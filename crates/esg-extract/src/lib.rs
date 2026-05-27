@@ -1,9 +1,11 @@
-//! Extraction layer: HTML bytes -> schema.org records -> graph nodes/edges.
+//! Extraction layer: HTML bytes -> product graph nodes/edges.
 //!
-//! Strategy: prefer `<script type="application/ld+json">` (the SEO-standard
-//! embedding every major e-commerce site ships). JSON-LD is clean structured
-//! data — no DOM heuristics needed for the happy path. microdata/RDFa fallback
-//! is a future addition (see README risks).
+//! Multi-source auto-select chain (priority order):
+//!   1. Platform product JSON (`"products":[...]` — doni/easy.co, cyberbiz)
+//!   2. DOM attributes (`ga-product` — shopline)
+//!   3. Next.js `__NEXT_DATA__` (SSR / post-render)
+//!   4. schema.org microdata (`itemprop` — 91app SSR)
+//!   5. schema.org JSON-LD (`@type: Product`)
 
 pub mod dom_attr;
 pub mod microdata;

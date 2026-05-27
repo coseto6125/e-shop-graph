@@ -184,8 +184,8 @@ fn value_as_f64(v: &Value) -> Option<f64> {
     }
 }
 
-/// Neighbors of `src` along `rel`. Out-direction uses the CSR out-edges; in
-/// uses a scan (the spike graph has no reverse CSR yet — see README backlog).
+/// Neighbors of `src` along `rel`. Out-direction uses the forward CSR; in uses
+/// the reverse CSR (`in_offsets` + `in_edges`). Both are O(degree).
 fn neighbors<'a>(
     graph: &'a ArchivedGraph,
     src: u32,
