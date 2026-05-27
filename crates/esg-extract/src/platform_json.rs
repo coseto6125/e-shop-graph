@@ -3,11 +3,12 @@
 //! richest, cleanest source in the wild: real sites (e.g. doni easy.co) ship
 //! ZERO schema.org JSON-LD but a full products array with variants.
 //!
-//! Schema observed on doni easy.co (product object):
-//!   id, handle, name, title, url, price, price_min/max, compare_at_price,
-//!   available, options_with_values, variants[], featured_image, metafields
-//! variant: id, sku, price, compare_at_price, available, inventory_quantity,
-//!   option1/2/3, title
+//! Variant models differ by platform (verified on real stores) — there is NO
+//! single field name, so we detect the shape rather than hardcode one:
+//!   A. `variants[]`      — doni/easy.co: array of {id,sku,price,option1..3,title}
+//!   B. `variations`      — shopline: array (often surfaced in DOM, SPA-rendered)
+//!   C. `price_range{min,max}` — cyberbiz: no variant array, just a price band
+//! All three normalize onto the same Product→Variant graph shape.
 
 use crate::price::PriceScale;
 use esg_core::{GraphBuilder, NodeKind, RelType};
@@ -68,29 +69,67 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
     if id.is_empty() {
         return;
     }
-    // A string `price_min` like "790.0" is reliably whole-units (the decimal
-    // point proves it) — use it as the symbol-independent peer for cross-field
-    // corroboration of the numeric `price`/`variant.price`.
-    let peer_whole = p
-        .get("price_min")
-        .and_then(Value::as_str)
-        .and_then(|s| s.parse::<f64>().ok());
+    // Whole-unit peer for symbol-independent price corroboration. Prefer a
+    // decimal string `price_min` ("790.0" — the dot proves whole units), else
+    // a numeric price_range.min.price.
+    let peer_whole = whole_unit_peer(p);
     let product_props = with_normalized_price(p, p.get("price"), scale, peer_whole);
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &product_props);
 
-    if let Some(variants) = p.get("variants").and_then(Value::as_array) {
+    ingest_variants(b, p, &id, product_idx, scale, peer_whole);
+}
+
+/// Emit Variant nodes from whichever variant model the product uses.
+fn ingest_variants(
+    b: &mut GraphBuilder,
+    p: &Value,
+    id: &str,
+    product_idx: u32,
+    scale: &PriceScale,
+    peer_whole: Option<f64>,
+) {
+    // Model A/B: an array under `variants` or `variations`.
+    let array = p
+        .get("variants")
+        .or_else(|| p.get("variations"))
+        .and_then(Value::as_array);
+    if let Some(variants) = array.filter(|a| !a.is_empty()) {
         for v in variants {
             let vid = v
                 .get("id")
                 .map(|x| format!("{id}#v{x}"))
                 .unwrap_or_else(|| format!("{id}#v"));
             let vtitle = v.get("title").and_then(Value::as_str).unwrap_or("");
-            // Variant price is corroborated against the same whole-unit peer.
             let vprops = with_normalized_price(v, v.get("price"), scale, peer_whole);
             b.upsert_node(NodeKind::Variant, &vid, vtitle, &vprops);
             b.add_edge(product_idx, RelType::HasVariant, &vid);
         }
+        return;
     }
+    // Model C: no variant array, only a `price_range{min,max}`. Emit a single
+    // Variant carrying the band so price queries still have a node to hit.
+    if let Some(range) = p.get("price_range") {
+        let vid = format!("{id}#range");
+        let band_price = range.get("min").and_then(|m| m.get("price"));
+        let vprops = with_normalized_price(range, band_price, scale, peer_whole);
+        b.upsert_node(NodeKind::Variant, &vid, "price_range", &vprops);
+        b.add_edge(product_idx, RelType::HasVariant, &vid);
+    }
+}
+
+/// A value KNOWN to be in whole units, for cross-field price corroboration.
+/// A decimal-string `price_min` is the strongest (the dot proves whole units);
+/// `price_range.min.price` is the cyberbiz fallback.
+fn whole_unit_peer(p: &Value) -> Option<f64> {
+    if let Some(s) = p.get("price_min").and_then(Value::as_str) {
+        if let Ok(v) = s.parse::<f64>() {
+            return Some(v);
+        }
+    }
+    p.get("price_range")
+        .and_then(|r| r.get("min"))
+        .and_then(|m| m.get("price"))
+        .and_then(Value::as_f64)
 }
 
 /// Serialize a node's source object with normalized `price_cents` + `currency`
