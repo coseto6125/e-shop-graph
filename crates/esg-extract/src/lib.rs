@@ -60,35 +60,37 @@ fn collect_objects(val: Value, out: &mut Vec<Value>) {
 
 /// Try extraction sources in priority order: platform product JSON first
 /// (richest), then schema.org JSON-LD. DOM/microdata fallback is future work.
-fn extract_page(html: &str) -> PageExtract {
+/// Each page carries its own `PriceScale` (visible prices) for unit inference.
+fn extract_page(html: &str) -> (PageExtract, price::PriceScale) {
+    let scale = price::PriceScale::from_html(html);
     if let Some(products) = platform_json::find_products_array(html) {
         if !products.is_empty() {
-            return PageExtract::Platform(products);
+            return (PageExtract::Platform(products), scale);
         }
     }
     let ld = extract_jsonld(html);
     if !ld.objects.is_empty() {
-        return PageExtract::JsonLd(ld.objects);
+        return (PageExtract::JsonLd(ld.objects), scale);
     }
-    PageExtract::Empty
+    (PageExtract::Empty, scale)
 }
 
 /// Parse many pages in parallel (auto-selecting the best source per page),
 /// then fold everything into one graph. Returns the populated builder.
 pub fn build_from_pages(pages: Vec<String>) -> Result<GraphBuilder> {
-    let per_page: Vec<PageExtract> =
+    let per_page: Vec<(PageExtract, price::PriceScale)> =
         pages.par_iter().map(|html| extract_page(html)).collect();
 
     let mut builder = GraphBuilder::new();
-    for page in per_page {
+    for (page, scale) in &per_page {
         match page {
             PageExtract::Platform(products) => {
-                for p in &products {
-                    platform_json::ingest_product(&mut builder, p);
+                for p in products {
+                    platform_json::ingest_product(&mut builder, p, scale);
                 }
             }
             PageExtract::JsonLd(objects) => {
-                for obj in &objects {
+                for obj in objects {
                     ingest_object(&mut builder, obj);
                 }
             }

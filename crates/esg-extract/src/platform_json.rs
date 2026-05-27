@@ -9,7 +9,7 @@
 //! variant: id, sku, price, compare_at_price, available, inventory_quantity,
 //!   option1/2/3, title
 
-use crate::price::{self, PriceLevel};
+use crate::price::PriceScale;
 use esg_core::{GraphBuilder, NodeKind, RelType};
 use serde_json::Value;
 
@@ -54,8 +54,9 @@ pub fn find_products_array(html: &str) -> Option<Vec<Value>> {
 }
 
 /// Ingest one platform product object into the graph: a Product node plus one
-/// Variant node per `variants[]` entry, linked by HasVariant.
-pub fn ingest_product(b: &mut GraphBuilder, p: &Value) {
+/// Variant node per `variants[]` entry, linked by HasVariant. `scale` carries
+/// the page's visible prices, used to infer each JSON number's unit/currency.
+pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
     let name = p.get("name").or_else(|| p.get("title")).and_then(Value::as_str).unwrap_or("");
     // Stable id: handle is the platform's slug; fall back to numeric id.
     let id = p
@@ -67,9 +68,7 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value) {
     if id.is_empty() {
         return;
     }
-    // Currency resolved once per product; variants inherit it.
-    let currency = price::resolve_currency(p, "TWD");
-    let product_props = with_normalized_price(p, p.get("price"), PriceLevel::Product, &currency);
+    let product_props = with_normalized_price(p, p.get("price"), scale);
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &product_props);
 
     if let Some(variants) = p.get("variants").and_then(Value::as_array) {
@@ -79,7 +78,7 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value) {
                 .map(|x| format!("{id}#v{x}"))
                 .unwrap_or_else(|| format!("{id}#v"));
             let vtitle = v.get("title").and_then(Value::as_str).unwrap_or("");
-            let vprops = with_normalized_price(v, v.get("price"), PriceLevel::Variant, &currency);
+            let vprops = with_normalized_price(v, v.get("price"), scale);
             b.upsert_node(NodeKind::Variant, &vid, vtitle, &vprops);
             b.add_edge(product_idx, RelType::HasVariant, &vid);
         }
@@ -87,18 +86,15 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value) {
 }
 
 /// Serialize a node's source object with normalized `price_cents` + `currency`
-/// injected, so queries see unit-consistent prices. Leaves the original `price`
-/// field intact for provenance.
-fn with_normalized_price(
-    obj: &Value,
-    price_field: Option<&Value>,
-    level: PriceLevel,
-    currency: &str,
-) -> String {
+/// injected (unit inferred from the page's visible prices via `scale`), so
+/// queries see unit-consistent prices. `price_confident=false` flags a value
+/// that no visible price corroborated. Original `price` is kept for provenance.
+fn with_normalized_price(obj: &Value, price_field: Option<&Value>, scale: &PriceScale) -> String {
     let mut map = obj.as_object().cloned().unwrap_or_default();
-    if let Some(cents) = price::to_cents(price_field, level) {
+    if let Some((cents, currency, confident)) = scale.to_cents(price_field) {
         map.insert("price_cents".into(), Value::Number(cents.into()));
+        map.insert("currency".into(), Value::String(currency.to_string()));
+        map.insert("price_confident".into(), Value::Bool(confident));
     }
-    map.insert("currency".into(), Value::String(currency.to_string()));
     Value::Object(map).to_string()
 }
