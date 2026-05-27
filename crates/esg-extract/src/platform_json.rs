@@ -68,7 +68,14 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
     if id.is_empty() {
         return;
     }
-    let product_props = with_normalized_price(p, p.get("price"), scale);
+    // A string `price_min` like "790.0" is reliably whole-units (the decimal
+    // point proves it) — use it as the symbol-independent peer for cross-field
+    // corroboration of the numeric `price`/`variant.price`.
+    let peer_whole = p
+        .get("price_min")
+        .and_then(Value::as_str)
+        .and_then(|s| s.parse::<f64>().ok());
+    let product_props = with_normalized_price(p, p.get("price"), scale, peer_whole);
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &product_props);
 
     if let Some(variants) = p.get("variants").and_then(Value::as_array) {
@@ -78,7 +85,8 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
                 .map(|x| format!("{id}#v{x}"))
                 .unwrap_or_else(|| format!("{id}#v"));
             let vtitle = v.get("title").and_then(Value::as_str).unwrap_or("");
-            let vprops = with_normalized_price(v, v.get("price"), scale);
+            // Variant price is corroborated against the same whole-unit peer.
+            let vprops = with_normalized_price(v, v.get("price"), scale, peer_whole);
             b.upsert_node(NodeKind::Variant, &vid, vtitle, &vprops);
             b.add_edge(product_idx, RelType::HasVariant, &vid);
         }
@@ -86,15 +94,21 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
 }
 
 /// Serialize a node's source object with normalized `price_cents` + `currency`
-/// injected (unit inferred from the page's visible prices via `scale`), so
-/// queries see unit-consistent prices. `price_confident=false` flags a value
-/// that no visible price corroborated. Original `price` is kept for provenance.
-fn with_normalized_price(obj: &Value, price_field: Option<&Value>, scale: &PriceScale) -> String {
+/// + `price_confident` injected. Unit is scored from independent signals (JSON
+/// cross-field via `peer_whole`, page anchors, recurrence) — see PriceVerdict.
+/// Original `price` is kept for provenance.
+fn with_normalized_price(
+    obj: &Value,
+    price_field: Option<&Value>,
+    scale: &PriceScale,
+    peer_whole: Option<f64>,
+) -> String {
     let mut map = obj.as_object().cloned().unwrap_or_default();
-    if let Some((cents, currency, confident)) = scale.to_cents(price_field) {
-        map.insert("price_cents".into(), Value::Number(cents.into()));
-        map.insert("currency".into(), Value::String(currency.to_string()));
-        map.insert("price_confident".into(), Value::Bool(confident));
+    if let Some(v) = scale.verdict(price_field, peer_whole) {
+        map.insert("price_cents".into(), Value::Number(v.cents.into()));
+        map.insert("currency".into(), Value::String(v.currency.to_string()));
+        map.insert("price_confident".into(), Value::Bool(v.confident()));
+        map.insert("price_score".into(), Value::Number(v.score.into()));
     }
     Value::Object(map).to_string()
 }
