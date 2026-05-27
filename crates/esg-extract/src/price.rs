@@ -53,11 +53,20 @@ pub struct PriceScale {
 
 impl PriceScale {
     pub fn from_html(html: &str) -> Self {
-        let counts = scan_displayed_amounts(html);
+        // Currency-symbol anchors only make sense in RENDERED text — the prices
+        // a human sees. Scanning the whole page wastes work (on doni, <script>
+        // is 78% of 245KB) and invites false anchors from JS/CSS literals
+        // (`setTimeout(x, 2000)`, pixel sizes). Strip script/style/tags first;
+        // the products-JSON region is handled separately by find_products_array,
+        // so dropping <script> here doesn't lose the structured prices.
+        let visible = visible_text(html);
+        let counts = scan_displayed_amounts(&visible);
         let recurring: HashSet<u64> =
             counts.iter().filter(|(_, &c)| c > 1).map(|(&v, _)| v).collect();
         let unit_set: HashSet<u64> = counts.into_keys().collect();
         let has_anchors = !unit_set.is_empty();
+        // Currency code may live in a JSON field (priceCurrency), so detect it
+        // against the full HTML, not just the rendered text.
         let currency = detect_currency(html);
         PriceScale { unit_set, recurring, has_anchors, currency }
     }
@@ -124,6 +133,83 @@ fn number_of(v: &Value) -> Option<f64> {
             cleaned.parse().ok()
         }
         _ => None,
+    }
+}
+
+/// Extract rendered text: drop `<script>`/`<style>` bodies entirely and strip
+/// all tags, keeping only what a human reads. Single pass, no regex. Used to
+/// confine currency-symbol scanning to the ~6% of the page that is real text.
+fn visible_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 8);
+    let bytes = html.as_bytes();
+    let n = bytes.len();
+    let mut i = 0;
+    while i < n {
+        if bytes[i] == b'<' {
+            // Skip <script>...</script> and <style>...</style> bodies wholesale.
+            if let Some(close) = skip_block(bytes, i, b"script") {
+                i = close;
+                continue;
+            }
+            if let Some(close) = skip_block(bytes, i, b"style") {
+                i = close;
+                continue;
+            }
+            // Otherwise skip just this tag, emit a space as a token boundary.
+            while i < n && bytes[i] != b'>' {
+                i += 1;
+            }
+            i += 1; // past '>'
+            out.push(' ');
+        } else {
+            // copy one full UTF-8 char
+            let ch_len = utf8_len(bytes[i]);
+            out.push_str(&html[i..(i + ch_len).min(n)]);
+            i += ch_len;
+        }
+    }
+    out
+}
+
+/// If an opening `<tag` starts at `at`, return the index just past its matching
+/// `</tag>`. Case-insensitive on the tag name.
+fn skip_block(b: &[u8], at: usize, tag: &[u8]) -> Option<usize> {
+    let after = at + 1;
+    if after + tag.len() > b.len() || !b[after..after + tag.len()].eq_ignore_ascii_case(tag) {
+        return None;
+    }
+    // find end of the opening tag
+    let mut i = after + tag.len();
+    while i < b.len() && b[i] != b'>' {
+        i += 1;
+    }
+    i += 1;
+    // scan for the closing </tag>
+    while i < b.len() {
+        if b[i] == b'<' && i + 1 < b.len() && b[i + 1] == b'/' {
+            let name_start = i + 2;
+            if name_start + tag.len() <= b.len()
+                && b[name_start..name_start + tag.len()].eq_ignore_ascii_case(tag)
+            {
+                let mut j = name_start + tag.len();
+                while j < b.len() && b[j] != b'>' {
+                    j += 1;
+                }
+                return Some((j + 1).min(b.len()));
+            }
+        }
+        i += 1;
+    }
+    Some(b.len()) // unterminated block: consume to end
+}
+
+#[inline]
+fn utf8_len(first: u8) -> usize {
+    match first {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
     }
 }
 
@@ -331,6 +417,23 @@ mod tests {
     fn excludes_common_non_price_numbers() {
         let scale = PriceScale::from_html("© 2024 ¥5 顆 ★4 評價");
         assert!(!scale.has_anchors);
+    }
+
+    /// Numbers inside <script>/<style> must NOT become price anchors, even when
+    /// a currency-looking char sits next to them. Confines scanning to rendered
+    /// text; guards against JS/CSS numeric noise.
+    #[test]
+    fn script_and_style_numbers_are_not_anchors() {
+        let html = r#"
+            <style>.p{width:1200px;$margin:300px}</style>
+            <script>setTimeout(fn,2000); var price=$990;</script>
+            <span>NT$ 450</span>
+        "#;
+        let scale = PriceScale::from_html(html);
+        // 990/1200/300/2000 are in script/style → not anchors; 450 (rendered) is.
+        assert!(scale.unit_set.contains(&450));
+        assert!(!scale.unit_set.contains(&990));
+        assert!(!scale.unit_set.contains(&1200));
     }
 
     /// Ambiguous symbols ($, 元) must NOT set a currency.
