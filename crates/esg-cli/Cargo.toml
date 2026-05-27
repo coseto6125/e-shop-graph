@@ -1,0 +1,14 @@
+[package]
+name = "esg-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "esg"
+path = "src/main.rs"
+
+[dependencies]
+esg-core = { workspace = true }
+esg-extract = { workspace = true }
+anyhow = { workspace = true }

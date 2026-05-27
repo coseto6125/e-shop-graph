@@ -1,0 +1,13 @@
+[package]
+name = "esg-extract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+esg-core = { workspace = true }
+scraper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rayon = { workspace = true }
+anyhow = { workspace = true }
