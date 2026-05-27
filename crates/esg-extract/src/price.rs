@@ -61,14 +61,22 @@ impl PriceScale {
         // so dropping <script> here doesn't lose the structured prices.
         let visible = visible_text(html);
         let counts = scan_displayed_amounts(&visible);
-        let recurring: HashSet<u64> =
-            counts.iter().filter(|(_, &c)| c > 1).map(|(&v, _)| v).collect();
+        let recurring: HashSet<u64> = counts
+            .iter()
+            .filter(|(_, &c)| c > 1)
+            .map(|(&v, _)| v)
+            .collect();
         let unit_set: HashSet<u64> = counts.into_keys().collect();
         let has_anchors = !unit_set.is_empty();
         // Currency code may live in a JSON field (priceCurrency), so detect it
         // against the full HTML, not just the rendered text.
         let currency = detect_currency(html);
-        PriceScale { unit_set, recurring, has_anchors, currency }
+        PriceScale {
+            unit_set,
+            recurring,
+            has_anchors,
+            currency,
+        }
     }
 
     /// Score one JSON price into cents. `peer_whole` is an optional companion
@@ -117,7 +125,11 @@ impl PriceScale {
 
         // Fallback: no corroboration → whole-units assumption, score stays low.
         let cents = cents.unwrap_or_else(|| (n * 100.0).round() as i64);
-        Some(PriceVerdict { cents, currency: self.currency, score })
+        Some(PriceVerdict {
+            cents,
+            currency: self.currency,
+            score,
+        })
     }
 }
 
@@ -128,8 +140,10 @@ fn number_of(v: &Value) -> Option<f64> {
     match v {
         Value::Number(n) => n.as_f64(),
         Value::String(s) => {
-            let cleaned: String =
-                s.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+            let cleaned: String = s
+                .chars()
+                .filter(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
             cleaned.parse().ok()
         }
         _ => None,
@@ -244,14 +258,22 @@ fn scan_displayed_amounts(html: &str) -> std::collections::HashMap<u64, u32> {
             // nearest non-space neighbor on each side
             let before = (0..start).rev().find_map(|k| {
                 let c = chars[k];
-                if c.is_whitespace() { None } else { Some(c) }
+                if c.is_whitespace() {
+                    None
+                } else {
+                    Some(c)
+                }
             });
             let after = (i..n).find_map(|k| {
                 let c = chars[k];
-                if c.is_whitespace() { None } else { Some(c) }
+                if c.is_whitespace() {
+                    None
+                } else {
+                    Some(c)
+                }
             });
-            let has_currency_neighbor = before.is_some_and(is_currency_symbol)
-                || after.is_some_and(is_currency_symbol);
+            let has_currency_neighbor =
+                before.is_some_and(is_currency_symbol) || after.is_some_and(is_currency_symbol);
             if has_currency_neighbor {
                 if let Some(whole) = whole_units(&token) {
                     if is_price_like(whole) {
@@ -359,8 +381,8 @@ fn iso_code_after(html: &str, key: &str) -> Option<&'static str> {
 /// (we only store codes we can vouch for; extend as needed).
 fn iso4217(code: &str) -> Option<&'static str> {
     const CODES: &[&str] = &[
-        "USD", "EUR", "GBP", "JPY", "CNY", "TWD", "HKD", "SGD", "AUD", "CAD",
-        "KRW", "INR", "ILS", "THB", "MYR", "PHP", "IDR", "VND", "BRL", "MXN",
+        "USD", "EUR", "GBP", "JPY", "CNY", "TWD", "HKD", "SGD", "AUD", "CAD", "KRW", "INR", "ILS",
+        "THB", "MYR", "PHP", "IDR", "VND", "BRL", "MXN",
     ];
     CODES.iter().copied().find(|&c| c == code)
 }
@@ -407,7 +429,7 @@ mod tests {
         let v = scale.verdict(Some(&json!(79000)), Some(790.0)).unwrap();
         assert_eq!(v.cents, 79000);
         assert!(v.confident()); // score 3 from cross-field alone
-        // whole-unit value against same peer → ×100
+                                // whole-unit value against same peer → ×100
         let w = scale.verdict(Some(&json!(790)), Some(790.0)).unwrap();
         assert_eq!((w.cents, w.confident()), (79000, true));
     }

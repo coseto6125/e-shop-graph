@@ -29,7 +29,10 @@ impl GraphBuilder {
         }
         let off = self.pool.len() as u32;
         self.pool.extend_from_slice(s.as_bytes());
-        let slice = Str { off, len: s.len() as u32 };
+        let slice = Str {
+            off,
+            len: s.len() as u32,
+        };
         self.intern.insert(s.to_string(), slice);
         slice
     }
@@ -60,7 +63,13 @@ impl GraphBuilder {
     /// Flatten into CSR. Edges with an unresolved target id are dropped (a
     /// dangling reference is not a graph edge).
     pub fn build(self) -> Graph {
-        let GraphBuilder { pool, nodes, id_index, mut pending_edges, .. } = self;
+        let GraphBuilder {
+            pool,
+            nodes,
+            id_index,
+            mut pending_edges,
+            ..
+        } = self;
         let n = nodes.len();
 
         // Bucket edges per source (forward) and per target (reverse) in one

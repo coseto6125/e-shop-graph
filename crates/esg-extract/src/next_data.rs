@@ -41,7 +41,9 @@ fn walk(v: &Value, out: &mut Vec<Value>) {
 }
 
 fn is_product_like(v: &Value) -> bool {
-    let Some(obj) = v.as_object() else { return false };
+    let Some(obj) = v.as_object() else {
+        return false;
+    };
     let has = |kinds: &[&str]| {
         obj.keys()
             .any(|k| kinds.iter().any(|n| k.to_ascii_lowercase().contains(n)))

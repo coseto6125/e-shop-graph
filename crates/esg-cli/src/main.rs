@@ -21,7 +21,8 @@ fn main() -> Result<()> {
     // defaults to <dir>/graph.bin for local runs.
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(
-        args.next().context("usage: esg <html_dir> [out_graph_path]")?,
+        args.next()
+            .context("usage: esg <html_dir> [out_graph_path]")?,
     );
     let bin = args
         .next()
@@ -108,7 +109,11 @@ fn main() -> Result<()> {
                   RETURN p.name, count(v), min(v.price_cents)";
     match esg_core::cypher::query(g, cy_agg) {
         Ok(res) => {
-            println!("aggregate: {} groups [{}]", res.rows.len(), res.columns.join(", "));
+            println!(
+                "aggregate: {} groups [{}]",
+                res.rows.len(),
+                res.columns.join(", ")
+            );
             for row in res.rows.iter().take(3) {
                 let cells: Vec<String> = row.iter().map(fmt_value).collect();
                 println!("    {}", cells.join(" | "));

@@ -48,7 +48,9 @@ pub fn extract_jsonld(html: &str) -> PageRecords {
     let mut objects = Vec::new();
     for el in doc.select(&sel) {
         let text = el.text().collect::<String>();
-        let Ok(val) = serde_json::from_str::<Value>(&text) else { continue };
+        let Ok(val) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
         collect_objects(val, &mut objects);
     }
     PageRecords { objects }
@@ -226,8 +228,16 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value) {
 
     if let Some(rating) = obj.get("aggregateRating") {
         let rating_id = format!("{id}#rating");
-        let rv = rating.get("ratingValue").map(|v| v.to_string()).unwrap_or_default();
-        b.upsert_node(NodeKind::AggregateRating, &rating_id, &rv, &rating.to_string());
+        let rv = rating
+            .get("ratingValue")
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        b.upsert_node(
+            NodeKind::AggregateRating,
+            &rating_id,
+            &rv,
+            &rating.to_string(),
+        );
         b.add_edge(product_idx, RelType::AggregateRating, &rating_id);
     }
 }

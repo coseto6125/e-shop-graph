@@ -11,7 +11,11 @@ use crate::schema::{NodeKind, RelType};
 
 pub fn parse(input: &str) -> Result<Query, String> {
     let tokens = tokenize(input)?;
-    Parser { toks: tokens, pos: 0 }.query()
+    Parser {
+        toks: tokens,
+        pos: 0,
+    }
+    .query()
 }
 
 struct Parser {
@@ -77,7 +81,12 @@ impl Parser {
         } else {
             None
         };
-        Ok(Query { pattern, where_, return_, limit })
+        Ok(Query {
+            pattern,
+            where_,
+            return_,
+            limit,
+        })
     }
 
     fn pattern(&mut self) -> Result<Pattern, String> {
@@ -162,7 +171,11 @@ impl Parser {
                 self.next();
                 let (var, prop) = self.agg_arg()?;
                 self.expect(&Token::RParen)?;
-                return Ok(ReturnItem { var, prop, agg: Some(agg) });
+                return Ok(ReturnItem {
+                    var,
+                    prop,
+                    agg: Some(agg),
+                });
             }
         }
         // Plain `var` or `var.prop` (a group-by key).
@@ -172,7 +185,11 @@ impl Parser {
         } else {
             None
         };
-        Ok(ReturnItem { var: first, prop, agg: None })
+        Ok(ReturnItem {
+            var: first,
+            prop,
+            agg: None,
+        })
     }
 
     /// Argument of an aggregate: `var` | `var.prop`. Bare `var` (e.g.

@@ -43,7 +43,13 @@ pub fn extract_microdata_products(html: &str) -> Vec<MicrodataProduct> {
         return Vec::new();
     };
 
-    vec![MicrodataProduct { name, price, currency, image, url }]
+    vec![MicrodataProduct {
+        name,
+        price,
+        currency,
+        image,
+        url,
+    }]
 }
 
 pub fn ingest_microdata(b: &mut GraphBuilder, products: &[MicrodataProduct]) {

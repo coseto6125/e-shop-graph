@@ -10,8 +10,7 @@ use std::path::Path;
 /// Serialize `graph` to rkyv bytes and write atomically (temp + rename) so a
 /// reader never observes a half-written `graph.bin`.
 pub fn save(graph: &Graph, path: &Path) -> Result<usize> {
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(graph)
-        .context("rkyv serialize graph")?;
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(graph).context("rkyv serialize graph")?;
     let tmp = path.with_extension("bin.tmp");
     fs::write(&tmp, &bytes).context("write tmp graph.bin")?;
     fs::rename(&tmp, path).context("atomic rename graph.bin")?;

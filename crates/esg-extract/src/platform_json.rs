@@ -58,7 +58,11 @@ pub fn find_products_array(html: &str) -> Option<Vec<Value>> {
 /// Variant node per `variants[]` entry, linked by HasVariant. `scale` carries
 /// the page's visible prices, used to infer each JSON number's unit/currency.
 pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
-    let name = p.get("name").or_else(|| p.get("title")).and_then(Value::as_str).unwrap_or("");
+    let name = p
+        .get("name")
+        .or_else(|| p.get("title"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
     // Stable id: handle is the platform's slug; fall back to numeric id.
     let id = p
         .get("handle")
@@ -132,10 +136,10 @@ fn whole_unit_peer(p: &Value) -> Option<f64> {
         .and_then(Value::as_f64)
 }
 
-/// Serialize a node's source object with normalized `price_cents` + `currency`
-/// + `price_confident` injected. Unit is scored from independent signals (JSON
-/// cross-field via `peer_whole`, page anchors, recurrence) — see PriceVerdict.
-/// Original `price` is kept for provenance.
+/// Serialize a node's source object with normalized `price_cents`, `currency`,
+/// and `price_confident` injected. Unit is scored from independent signals
+/// (JSON cross-field via `peer_whole`, page anchors, recurrence) per
+/// `PriceVerdict`; the original `price` is kept for provenance.
 fn with_normalized_price(
     obj: &Value,
     price_field: Option<&Value>,

@@ -9,7 +9,11 @@ pub enum Value {
     Float(f64),
     Str(String),
     /// A matched node, projected for serialization. `idx` is the graph node id.
-    NodeRef { idx: u32, kind: String, name: String },
+    NodeRef {
+        idx: u32,
+        kind: String,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, Default)]

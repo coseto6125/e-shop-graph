@@ -65,7 +65,10 @@ fn with_price(obj: &Value, scale: &PriceScale) -> String {
     let mut map = obj.as_object().cloned().unwrap_or_default();
     if let Some(verdict) = scale.verdict(obj.get("price"), None) {
         map.insert("price_cents".into(), Value::Number(verdict.cents.into()));
-        map.insert("currency".into(), Value::String(verdict.currency.to_string()));
+        map.insert(
+            "currency".into(),
+            Value::String(verdict.currency.to_string()),
+        );
         map.insert("price_confident".into(), Value::Bool(verdict.confident()));
     }
     Value::Object(map).to_string()

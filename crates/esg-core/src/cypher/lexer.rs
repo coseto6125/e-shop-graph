@@ -38,39 +38,76 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
         let c = bytes[i] as char;
         match c {
             c if c.is_whitespace() => i += 1,
-            '(' => { out.push(Token::LParen); i += 1; }
-            ')' => { out.push(Token::RParen); i += 1; }
-            '[' => { out.push(Token::LBracket); i += 1; }
-            ']' => { out.push(Token::RBracket); i += 1; }
-            ':' => { out.push(Token::Colon); i += 1; }
-            ',' => { out.push(Token::Comma); i += 1; }
-            '.' => { out.push(Token::Dot); i += 1; }
-            '|' => { out.push(Token::Pipe); i += 1; }
+            '(' => {
+                out.push(Token::LParen);
+                i += 1;
+            }
+            ')' => {
+                out.push(Token::RParen);
+                i += 1;
+            }
+            '[' => {
+                out.push(Token::LBracket);
+                i += 1;
+            }
+            ']' => {
+                out.push(Token::RBracket);
+                i += 1;
+            }
+            ':' => {
+                out.push(Token::Colon);
+                i += 1;
+            }
+            ',' => {
+                out.push(Token::Comma);
+                i += 1;
+            }
+            '.' => {
+                out.push(Token::Dot);
+                i += 1;
+            }
+            '|' => {
+                out.push(Token::Pipe);
+                i += 1;
+            }
             '-' => {
                 if input[i..].starts_with("->") {
-                    out.push(Token::ArrowRight); i += 2;
+                    out.push(Token::ArrowRight);
+                    i += 2;
                 } else {
-                    out.push(Token::Dash); i += 1;
+                    out.push(Token::Dash);
+                    i += 1;
                 }
             }
             '<' => {
                 if input[i..].starts_with("<-") {
-                    out.push(Token::ArrowLeft); i += 2;
+                    out.push(Token::ArrowLeft);
+                    i += 2;
                 } else if input[i..].starts_with("<=") {
-                    out.push(Token::Le); i += 2;
+                    out.push(Token::Le);
+                    i += 2;
                 } else {
-                    out.push(Token::Lt); i += 1;
+                    out.push(Token::Lt);
+                    i += 1;
                 }
             }
             '>' => {
                 if input[i..].starts_with(">=") {
-                    out.push(Token::Ge); i += 2;
+                    out.push(Token::Ge);
+                    i += 2;
                 } else {
-                    out.push(Token::Gt); i += 1;
+                    out.push(Token::Gt);
+                    i += 1;
                 }
             }
-            '=' => { out.push(Token::Eq); i += 1; }
-            '!' if input[i..].starts_with("!=") => { out.push(Token::Ne); i += 2; }
+            '=' => {
+                out.push(Token::Eq);
+                i += 1;
+            }
+            '!' if input[i..].starts_with("!=") => {
+                out.push(Token::Ne);
+                i += 2;
+            }
             '\'' | '"' => {
                 let quote = c;
                 let start = i + 1;
