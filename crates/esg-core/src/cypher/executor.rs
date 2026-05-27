@@ -60,25 +60,128 @@ pub fn execute(graph: &ArchivedGraph, q: &Query) -> Result<QueryResult, String> 
     let columns = q
         .return_
         .iter()
-        .map(|ri| match &ri.prop {
-            Some(p) => format!("{}.{}", ri.var, p),
-            None => ri.var.clone(),
+        .map(|ri| {
+            let base = match &ri.prop {
+                Some(p) => format!("{}.{}", ri.var, p),
+                None => ri.var.clone(),
+            };
+            match ri.agg {
+                Some(a) => format!("{}({base})", agg_name(a)),
+                None => base,
+            }
         })
         .collect();
 
-    let mut rows = Vec::with_capacity(bindings.len());
-    for b in &bindings {
-        let mut row = Vec::with_capacity(q.return_.len());
-        for ri in &q.return_ {
+    let has_agg = q.return_.iter().any(|ri| ri.agg.is_some());
+    let rows = if has_agg {
+        aggregate_rows(graph, q, &bindings, &var_pos)?
+    } else {
+        let mut rows = Vec::with_capacity(bindings.len());
+        for b in &bindings {
+            let mut row = Vec::with_capacity(q.return_.len());
+            for ri in &q.return_ {
+                let pos = var_pos(&ri.var)
+                    .ok_or_else(|| format!("RETURN references unknown variable {}", ri.var))?;
+                row.push(project(graph, b[pos], ri.prop.as_deref()));
+            }
+            rows.push(row);
+        }
+        rows
+    };
+
+    Ok(QueryResult { columns, rows })
+}
+
+fn agg_name(a: Agg) -> &'static str {
+    match a {
+        Agg::Count => "count",
+        Agg::Min => "min",
+        Agg::Max => "max",
+        Agg::Sum => "sum",
+        Agg::Avg => "avg",
+    }
+}
+
+/// Group bindings by the non-aggregate RETURN items (the group keys), then
+/// compute each aggregate per group. With no group keys, all bindings form one
+/// group (e.g. `RETURN count(p)`).
+fn aggregate_rows(
+    graph: &ArchivedGraph,
+    q: &Query,
+    bindings: &[Binding],
+    var_pos: &impl Fn(&str) -> Option<usize>,
+) -> Result<Vec<Vec<Value>>, String> {
+    use std::collections::BTreeMap;
+
+    let key_items: Vec<&ReturnItem> = q.return_.iter().filter(|ri| ri.agg.is_none()).collect();
+    let agg_items: Vec<&ReturnItem> = q.return_.iter().filter(|ri| ri.agg.is_some()).collect();
+
+    // group key (string form) -> (projected key values, collected agg inputs).
+    let mut groups: BTreeMap<String, (Vec<Value>, Vec<Vec<f64>>)> = BTreeMap::new();
+
+    for b in bindings {
+        // Build the group key + its projected display values.
+        let mut key_str = String::new();
+        let mut key_vals = Vec::with_capacity(key_items.len());
+        for ri in &key_items {
             let pos = var_pos(&ri.var)
                 .ok_or_else(|| format!("RETURN references unknown variable {}", ri.var))?;
-            let node_idx = b[pos];
-            row.push(project(graph, node_idx, ri.prop.as_deref()));
+            let v = project(graph, b[pos], ri.prop.as_deref());
+            key_str.push_str(&format!("{v:?}\u{1}"));
+            key_vals.push(v);
+        }
+        let entry = groups
+            .entry(key_str)
+            .or_insert_with(|| (key_vals, vec![Vec::new(); agg_items.len()]));
+        // Collect each aggregate's numeric input for this row.
+        for (ai, ri) in agg_items.iter().enumerate() {
+            let pos = var_pos(&ri.var)
+                .ok_or_else(|| format!("RETURN references unknown variable {}", ri.var))?;
+            if ri.agg == Some(Agg::Count) {
+                entry.1[ai].push(1.0); // count tallies rows; value irrelevant
+            } else if let Some(n) = value_as_f64(&project(graph, b[pos], ri.prop.as_deref())) {
+                entry.1[ai].push(n);
+            }
+        }
+    }
+
+    // Emit one row per group: key values, then aggregates in RETURN order.
+    let mut rows = Vec::with_capacity(groups.len());
+    for (_k, (key_vals, agg_inputs)) in groups {
+        let mut key_iter = key_vals.into_iter();
+        let mut agg_iter = agg_inputs.into_iter();
+        let mut row = Vec::with_capacity(q.return_.len());
+        for ri in &q.return_ {
+            match ri.agg {
+                None => row.push(key_iter.next().unwrap_or(Value::Null)),
+                Some(a) => {
+                    let inputs = agg_iter.next().unwrap_or_default();
+                    row.push(fold_agg(a, &inputs));
+                }
+            }
         }
         rows.push(row);
     }
+    Ok(rows)
+}
 
-    Ok(QueryResult { columns, rows })
+fn fold_agg(a: Agg, xs: &[f64]) -> Value {
+    match a {
+        Agg::Count => Value::Int(xs.len() as i64),
+        _ if xs.is_empty() => Value::Null,
+        Agg::Min => Value::Float(xs.iter().cloned().fold(f64::INFINITY, f64::min)),
+        Agg::Max => Value::Float(xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)),
+        Agg::Sum => Value::Float(xs.iter().sum()),
+        Agg::Avg => Value::Float(xs.iter().sum::<f64>() / xs.len() as f64),
+    }
+}
+
+fn value_as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(i) => Some(*i as f64),
+        Value::Float(f) => Some(*f),
+        _ => None,
+    }
 }
 
 /// Neighbors of `src` along `rel`. Out-direction uses the CSR out-edges; in

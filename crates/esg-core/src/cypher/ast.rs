@@ -67,9 +67,23 @@ pub enum Expr {
     Lit(Literal),
 }
 
+/// Aggregate function over a column. `Count` may target the whole row
+/// (`count(*)`/`count(p)`); the others need a numeric `var.prop`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agg {
+    Count,
+    Min,
+    Max,
+    Sum,
+    Avg,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReturnItem {
     /// `(var, Some(prop))` = `var.prop`; `(var, None)` = the node itself.
     pub var: String,
     pub prop: Option<String>,
+    /// When set, this item is an aggregate (e.g. `count(p)`, `min(v.price)`).
+    /// Items WITHOUT an agg are the group-by keys.
+    pub agg: Option<Agg>,
 }

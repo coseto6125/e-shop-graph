@@ -103,6 +103,20 @@ fn main() -> Result<()> {
         Err(e) => println!("inbound ERROR: {e}"),
     }
 
+    // ── Stage 6c: aggregation — variants per product + cheapest variant ──────
+    let cy_agg = "MATCH (p:Product)-[:HasVariant]->(v:Variant) \
+                  RETURN p.name, count(v), min(v.price_cents)";
+    match esg_core::cypher::query(g, cy_agg) {
+        Ok(res) => {
+            println!("aggregate: {} groups [{}]", res.rows.len(), res.columns.join(", "));
+            for row in res.rows.iter().take(3) {
+                let cells: Vec<String> = row.iter().map(fmt_value).collect();
+                println!("    {}", cells.join(" | "));
+            }
+        }
+        Err(e) => println!("aggregate ERROR: {e}"),
+    }
+
     // ── Stage 7: price filter — verifies normalized price_cents (cents) ──────
     // 80000 cents = 800 whole units. Without normalization, variant.price=99000
     // would never compare correctly against whole-unit thresholds.

@@ -155,6 +155,29 @@ impl Parser {
     }
 
     fn return_item(&mut self) -> Result<ReturnItem, String> {
+        // An identifier followed by `(` is an aggregate: count(p), min(v.price).
+        let first = self.ident()?;
+        if let Some(agg) = agg_from_name(&first) {
+            if matches!(self.peek(), Some(Token::LParen)) {
+                self.next();
+                let (var, prop) = self.agg_arg()?;
+                self.expect(&Token::RParen)?;
+                return Ok(ReturnItem { var, prop, agg: Some(agg) });
+            }
+        }
+        // Plain `var` or `var.prop` (a group-by key).
+        let prop = if matches!(self.peek(), Some(Token::Dot)) {
+            self.next();
+            Some(self.ident()?)
+        } else {
+            None
+        };
+        Ok(ReturnItem { var: first, prop, agg: None })
+    }
+
+    /// Argument of an aggregate: `var` | `var.prop`. Bare `var` (e.g.
+    /// `count(p)`) yields prop=None — a whole-node count.
+    fn agg_arg(&mut self) -> Result<(String, Option<String>), String> {
         let var = self.ident()?;
         let prop = if matches!(self.peek(), Some(Token::Dot)) {
             self.next();
@@ -162,7 +185,7 @@ impl Parser {
         } else {
             None
         };
-        Ok(ReturnItem { var, prop })
+        Ok((var, prop))
     }
 
     // ── Expression: OR / AND / comparison / primary ──────────────────────────
@@ -217,5 +240,18 @@ impl Parser {
             Some(Token::Str(s)) => Ok(Expr::Lit(Literal::Str(s))),
             other => Err(format!("unexpected token in expression: {other:?}")),
         }
+    }
+}
+
+/// Recognize an aggregate function name (case-insensitive). Returns None for
+/// ordinary identifiers so they're parsed as group-by keys.
+fn agg_from_name(name: &str) -> Option<Agg> {
+    match name.to_ascii_lowercase().as_str() {
+        "count" => Some(Agg::Count),
+        "min" => Some(Agg::Min),
+        "max" => Some(Agg::Max),
+        "sum" => Some(Agg::Sum),
+        "avg" => Some(Agg::Avg),
+        _ => None,
     }
 }
