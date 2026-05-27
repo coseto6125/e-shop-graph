@@ -3,7 +3,7 @@
 //! `GraphBuilder.build()` — pay the indexing cost once at build time so reads
 //! are allocation-free.
 
-use crate::graph::{Edge, Graph, Node, Str, MAGIC, VERSION};
+use crate::graph::{Edge, Graph, InEdge, Node, Str, MAGIC, VERSION};
 use crate::schema::{NodeKind, RelType};
 use std::collections::HashMap;
 
@@ -63,11 +63,14 @@ impl GraphBuilder {
         let GraphBuilder { pool, nodes, id_index, mut pending_edges, .. } = self;
         let n = nodes.len();
 
-        // Bucket out-edges per source so CSR offsets are monotonic.
+        // Bucket edges per source (forward) and per target (reverse) in one
+        // pass, so both CSRs are built from the same resolved edge set.
         let mut per_src: Vec<Vec<Edge>> = vec![Vec::new(); n];
+        let mut per_dst: Vec<Vec<InEdge>> = vec![Vec::new(); n];
         for (src, rel, dst_id) in pending_edges.drain(..) {
             if let Some(&dst) = id_index.get(&dst_id) {
                 per_src[src as usize].push(Edge { rel, dst });
+                per_dst[dst as usize].push(InEdge { rel, src });
             }
         }
 
@@ -79,6 +82,23 @@ impl GraphBuilder {
             out_offsets.push(edges.len() as u32);
         }
 
-        Graph { magic: MAGIC, version: VERSION, string_pool: pool, nodes, edges, out_offsets }
+        let mut in_edges = Vec::new();
+        let mut in_offsets = Vec::with_capacity(n + 1);
+        in_offsets.push(0u32);
+        for bucket in per_dst {
+            in_edges.extend(bucket);
+            in_offsets.push(in_edges.len() as u32);
+        }
+
+        Graph {
+            magic: MAGIC,
+            version: VERSION,
+            string_pool: pool,
+            nodes,
+            edges,
+            out_offsets,
+            in_edges,
+            in_offsets,
+        }
     }
 }

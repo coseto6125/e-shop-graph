@@ -41,6 +41,16 @@ pub struct Edge {
     pub dst: u32,
 }
 
+/// Reverse-adjacency entry: for a target node, "who points at me, via what".
+/// Mirror of `Edge` with `src` instead of `dst`, grouped by target in CSR.
+#[derive(Archive, Serialize, Deserialize, Debug, Clone, Copy)]
+#[rkyv(derive(Debug))]
+pub struct InEdge {
+    pub rel: RelType,
+    /// Source node index that points at this target.
+    pub src: u32,
+}
+
 #[derive(Archive, Serialize, Deserialize, Debug)]
 #[rkyv(derive(Debug))]
 pub struct Graph {
@@ -53,10 +63,15 @@ pub struct Graph {
     /// CSR boundaries: `edges[out_offsets[i]..out_offsets[i+1]]` are node i's
     /// out-edges. Length is `nodes.len() + 1`.
     pub out_offsets: Vec<u32>,
+    /// Reverse CSR: `in_edges[in_offsets[i]..in_offsets[i+1]]` are the edges
+    /// pointing AT node i. Answers "who references me" (Cypher inbound `<-`) in
+    /// O(in-degree) instead of scanning every edge. Length `nodes.len() + 1`.
+    pub in_edges: Vec<InEdge>,
+    pub in_offsets: Vec<u32>,
 }
 
 pub const MAGIC: [u8; 4] = *b"ESG1";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 impl Graph {
     /// Resolve a `Str` slice against the pool. Panics on out-of-bounds — a
@@ -75,5 +90,14 @@ impl Graph {
         let lo = self.out_offsets[i] as usize;
         let hi = self.out_offsets[i + 1] as usize;
         &self.edges[lo..hi]
+    }
+
+    /// In-edges (who points at `node_idx`) as a slice — O(1), no allocation.
+    #[inline]
+    pub fn in_edges(&self, node_idx: u32) -> &[InEdge] {
+        let i = node_idx as usize;
+        let lo = self.in_offsets[i] as usize;
+        let hi = self.in_offsets[i + 1] as usize;
+        &self.in_edges[lo..hi]
     }
 }

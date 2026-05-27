@@ -96,6 +96,13 @@ fn main() -> Result<()> {
         Err(e) => println!("cypher ERROR: {e}"),
     }
 
+    // ── Stage 6b: inbound query — verifies reverse CSR (Variant <- Product) ──
+    let cy_in = "MATCH (v:Variant)<-[:HasVariant]-(p:Product) RETURN p.name, v.name LIMIT 3";
+    match esg_core::cypher::query(g, cy_in) {
+        Ok(res) => println!("inbound: {} rows (reverse CSR)", res.rows.len()),
+        Err(e) => println!("inbound ERROR: {e}"),
+    }
+
     // ── Stage 7: price filter — verifies normalized price_cents (cents) ──────
     // 80000 cents = 800 whole units. Without normalization, variant.price=99000
     // would never compare correctly against whole-unit thresholds.

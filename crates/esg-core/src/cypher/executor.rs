@@ -100,16 +100,12 @@ fn neighbors<'a>(
             }
         }
         Direction::In => {
-            // Reverse lookup by full scan. Acceptable for the spike; a reverse
-            // CSR (like ecp's in_offsets) is the production fix.
-            for (s, &ref off_lo) in graph.out_offsets.iter().enumerate() {
-                let lo = off_lo.to_native() as usize;
-                let hi = graph.out_offsets.get(s + 1).map(|o| o.to_native() as usize);
-                let Some(hi) = hi else { break };
-                for edge in &graph.edges[lo..hi] {
-                    if edge.dst.to_native() == src && rel_matches(&edge.rel, &rel.types) {
-                        out.push((s as u32, &edge.rel));
-                    }
+            // Reverse CSR: O(in-degree), no full scan.
+            let lo = graph.in_offsets[src as usize].to_native() as usize;
+            let hi = graph.in_offsets[src as usize + 1].to_native() as usize;
+            for in_edge in &graph.in_edges[lo..hi] {
+                if rel_matches(&in_edge.rel, &rel.types) {
+                    out.push((in_edge.src.to_native(), &in_edge.rel));
                 }
             }
         }
