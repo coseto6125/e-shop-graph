@@ -55,15 +55,46 @@ fn main() -> Result<()> {
     let g = loaded.graph();
     println!("load:  {:.3}ms", t_load.elapsed().as_secs_f64() * 1000.0);
 
-    // ── Stage 5: query — "every Product and its brand" ──────────────────────
+    // ── Stage 5: query — hardcoded CSR walk (Product→Brand) ─────────────────
     let t_q = Instant::now();
     let hits = query_products_with_brand(g);
     println!(
-        "query: {:.3}ms  ({hits} product→brand pairs)",
+        "query: {:.3}ms  (hardcoded: {hits} product→brand pairs)",
         t_q.elapsed().as_secs_f64() * 1000.0
     );
 
+    // ── Stage 6: Cypher — products and their variants ───────────────────────
+    let cy = "MATCH (p:Product)-[:HasVariant]->(v:Variant) RETURN p.name, v.name LIMIT 5";
+    let t_cy = Instant::now();
+    match esg_core::cypher::query(g, cy) {
+        Ok(res) => {
+            println!(
+                "cypher: {:.3}ms  ({} rows) [{}]",
+                t_cy.elapsed().as_secs_f64() * 1000.0,
+                res.rows.len(),
+                res.columns.join(", ")
+            );
+            for row in res.rows.iter().take(5) {
+                let cells: Vec<String> = row.iter().map(fmt_value).collect();
+                println!("    {}", cells.join(" | "));
+            }
+        }
+        Err(e) => println!("cypher ERROR: {e}"),
+    }
+
     Ok(())
+}
+
+fn fmt_value(v: &esg_core::cypher::Value) -> String {
+    use esg_core::cypher::Value::*;
+    match v {
+        Str(s) => s.clone(),
+        Int(i) => i.to_string(),
+        Float(f) => f.to_string(),
+        Bool(b) => b.to_string(),
+        Null => "null".into(),
+        NodeRef { kind, name, .. } => format!("{kind}({name})"),
+    }
 }
 
 /// Walks every Product node, follows its Brand out-edge via CSR. O(nodes+edges),

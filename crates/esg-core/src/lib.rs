@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod cypher;
 pub mod graph;
 pub mod schema;
 pub mod store;

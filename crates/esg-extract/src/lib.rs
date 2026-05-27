@@ -5,11 +5,23 @@
 //! data — no DOM heuristics needed for the happy path. microdata/RDFa fallback
 //! is a future addition (see README risks).
 
+pub mod platform_json;
+
 use anyhow::Result;
 use esg_core::{GraphBuilder, NodeKind, RelType};
 use rayon::prelude::*;
 use scraper::{Html, Selector};
 use serde_json::Value;
+
+/// What a page yielded, after trying sources in priority order.
+enum PageExtract {
+    /// Platform `"products":[...]` array (richest; doni easy.co case).
+    Platform(Vec<Value>),
+    /// schema.org JSON-LD objects.
+    JsonLd(Vec<Value>),
+    /// Nothing structured found.
+    Empty,
+}
 
 /// One source page's extracted JSON-LD objects (already parsed).
 pub struct PageRecords {
@@ -45,16 +57,41 @@ fn collect_objects(val: Value, out: &mut Vec<Value>) {
     }
 }
 
-/// Parse many pages in parallel, then fold all objects into one graph.
-/// Returns the populated builder for the caller to `build()`.
+/// Try extraction sources in priority order: platform product JSON first
+/// (richest), then schema.org JSON-LD. DOM/microdata fallback is future work.
+fn extract_page(html: &str) -> PageExtract {
+    if let Some(products) = platform_json::find_products_array(html) {
+        if !products.is_empty() {
+            return PageExtract::Platform(products);
+        }
+    }
+    let ld = extract_jsonld(html);
+    if !ld.objects.is_empty() {
+        return PageExtract::JsonLd(ld.objects);
+    }
+    PageExtract::Empty
+}
+
+/// Parse many pages in parallel (auto-selecting the best source per page),
+/// then fold everything into one graph. Returns the populated builder.
 pub fn build_from_pages(pages: Vec<String>) -> Result<GraphBuilder> {
-    let per_page: Vec<PageRecords> =
-        pages.par_iter().map(|html| extract_jsonld(html)).collect();
+    let per_page: Vec<PageExtract> =
+        pages.par_iter().map(|html| extract_page(html)).collect();
 
     let mut builder = GraphBuilder::new();
     for page in per_page {
-        for obj in page.objects {
-            ingest_object(&mut builder, &obj);
+        match page {
+            PageExtract::Platform(products) => {
+                for p in &products {
+                    platform_json::ingest_product(&mut builder, p);
+                }
+            }
+            PageExtract::JsonLd(objects) => {
+                for obj in &objects {
+                    ingest_object(&mut builder, obj);
+                }
+            }
+            PageExtract::Empty => {}
         }
     }
     Ok(builder)

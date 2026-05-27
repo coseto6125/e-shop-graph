@@ -20,6 +20,43 @@ pub enum NodeKind {
     AggregateRating,
     Category,
     Person,
+    /// A purchasable variant of a Product (color/size/style), each with its own
+    /// price/sku/inventory. Platform stores (Shopify-like, easy.co) model this
+    /// as `product.variants[]`; it plays the role schema.org gives `Offer`.
+    /// Appended at the END for rkyv discriminant stability.
+    Variant,
+}
+
+impl NodeKind {
+    /// Parse a schema.org type label (as written in Cypher / JSON-LD `@type`).
+    pub fn from_label(s: &str) -> Option<Self> {
+        Some(match s {
+            "Product" => Self::Product,
+            "Offer" => Self::Offer,
+            "Brand" => Self::Brand,
+            "Organization" => Self::Organization,
+            "Review" => Self::Review,
+            "AggregateRating" => Self::AggregateRating,
+            "Category" => Self::Category,
+            "Person" => Self::Person,
+            "Variant" => Self::Variant,
+            _ => return None,
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Product => "Product",
+            Self::Offer => "Offer",
+            Self::Brand => "Brand",
+            Self::Organization => "Organization",
+            Self::Review => "Review",
+            Self::AggregateRating => "AggregateRating",
+            Self::Category => "Category",
+            Self::Person => "Person",
+            Self::Variant => "Variant",
+        }
+    }
 }
 
 /// schema.org properties that become graph edges. Maps to JSON-LD property
@@ -44,4 +81,24 @@ pub enum RelType {
     Category,
     /// Review -> Person
     Author,
+    /// Product -> Variant. Appended at the END (rkyv discriminant stability).
+    HasVariant,
+}
+
+impl RelType {
+    /// Parse a relation type label as written in Cypher (`-[:Brand]->`).
+    pub fn from_label(s: &str) -> Option<Self> {
+        Some(match s {
+            "Offers" => Self::Offers,
+            "Brand" => Self::Brand,
+            "Manufacturer" => Self::Manufacturer,
+            "Review" => Self::Review,
+            "AggregateRating" => Self::AggregateRating,
+            "IsVariantOf" => Self::IsVariantOf,
+            "Category" => Self::Category,
+            "Author" => Self::Author,
+            "HasVariant" => Self::HasVariant,
+            _ => return None,
+        })
+    }
 }
