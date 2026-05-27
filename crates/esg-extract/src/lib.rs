@@ -5,6 +5,7 @@
 //! data — no DOM heuristics needed for the happy path. microdata/RDFa fallback
 //! is a future addition (see README risks).
 
+pub mod dom_attr;
 pub mod platform_json;
 pub mod price;
 
@@ -16,8 +17,10 @@ use serde_json::Value;
 
 /// What a page yielded, after trying sources in priority order.
 enum PageExtract {
-    /// Platform `"products":[...]` array (richest; doni easy.co case).
+    /// Layer 1: platform `"products":[...]` array (richest; doni/cyberbiz).
     Platform(Vec<Value>),
+    /// Layer 2: products embedded in `ga-product='{}'` DOM attributes (shopline).
+    DomAttr(Vec<Value>),
     /// schema.org JSON-LD objects.
     JsonLd(Vec<Value>),
     /// Nothing structured found.
@@ -68,6 +71,10 @@ fn extract_page(html: &str) -> (PageExtract, price::PriceScale) {
             return (PageExtract::Platform(products), scale);
         }
     }
+    let ga = dom_attr::find_ga_products(html);
+    if !ga.is_empty() {
+        return (PageExtract::DomAttr(ga), scale);
+    }
     let ld = extract_jsonld(html);
     if !ld.objects.is_empty() {
         return (PageExtract::JsonLd(ld.objects), scale);
@@ -87,6 +94,11 @@ pub fn build_from_pages(pages: Vec<String>) -> Result<GraphBuilder> {
             PageExtract::Platform(products) => {
                 for p in products {
                     platform_json::ingest_product(&mut builder, p, scale);
+                }
+            }
+            PageExtract::DomAttr(products) => {
+                for p in products {
+                    dom_attr::ingest_ga_product(&mut builder, p, scale);
                 }
             }
             PageExtract::JsonLd(objects) => {
