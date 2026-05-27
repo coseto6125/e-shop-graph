@@ -6,6 +6,7 @@
 //! is a future addition (see README risks).
 
 pub mod platform_json;
+pub mod price;
 
 use anyhow::Result;
 use esg_core::{GraphBuilder, NodeKind, RelType};

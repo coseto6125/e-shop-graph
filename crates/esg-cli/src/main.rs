@@ -82,6 +82,21 @@ fn main() -> Result<()> {
         Err(e) => println!("cypher ERROR: {e}"),
     }
 
+    // ── Stage 7: price filter — verifies normalized price_cents (cents) ──────
+    // 80000 cents = 800 whole units. Without normalization, variant.price=99000
+    // would never compare correctly against whole-unit thresholds.
+    let cy2 = "MATCH (v:Variant) WHERE v.price_cents < 80000 RETURN v.name, v.price_cents";
+    match esg_core::cypher::query(g, cy2) {
+        Ok(res) => {
+            println!("price filter (<800): {} variants", res.rows.len());
+            for row in res.rows.iter().take(3) {
+                let cells: Vec<String> = row.iter().map(fmt_value).collect();
+                println!("    {}", cells.join(" | "));
+            }
+        }
+        Err(e) => println!("price filter ERROR: {e}"),
+    }
+
     Ok(())
 }
 

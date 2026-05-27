@@ -9,6 +9,7 @@
 //! variant: id, sku, price, compare_at_price, available, inventory_quantity,
 //!   option1/2/3, title
 
+use crate::price::{self, PriceLevel};
 use esg_core::{GraphBuilder, NodeKind, RelType};
 use serde_json::Value;
 
@@ -66,7 +67,10 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value) {
     if id.is_empty() {
         return;
     }
-    let product_idx = b.upsert_node(NodeKind::Product, &id, name, &p.to_string());
+    // Currency resolved once per product; variants inherit it.
+    let currency = price::resolve_currency(p, "TWD");
+    let product_props = with_normalized_price(p, p.get("price"), PriceLevel::Product, &currency);
+    let product_idx = b.upsert_node(NodeKind::Product, &id, name, &product_props);
 
     if let Some(variants) = p.get("variants").and_then(Value::as_array) {
         for v in variants {
@@ -75,8 +79,26 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value) {
                 .map(|x| format!("{id}#v{x}"))
                 .unwrap_or_else(|| format!("{id}#v"));
             let vtitle = v.get("title").and_then(Value::as_str).unwrap_or("");
-            b.upsert_node(NodeKind::Variant, &vid, vtitle, &v.to_string());
+            let vprops = with_normalized_price(v, v.get("price"), PriceLevel::Variant, &currency);
+            b.upsert_node(NodeKind::Variant, &vid, vtitle, &vprops);
             b.add_edge(product_idx, RelType::HasVariant, &vid);
         }
     }
+}
+
+/// Serialize a node's source object with normalized `price_cents` + `currency`
+/// injected, so queries see unit-consistent prices. Leaves the original `price`
+/// field intact for provenance.
+fn with_normalized_price(
+    obj: &Value,
+    price_field: Option<&Value>,
+    level: PriceLevel,
+    currency: &str,
+) -> String {
+    let mut map = obj.as_object().cloned().unwrap_or_default();
+    if let Some(cents) = price::to_cents(price_field, level) {
+        map.insert("price_cents".into(), Value::Number(cents.into()));
+    }
+    map.insert("currency".into(), Value::String(currency.to_string()));
+    Value::Object(map).to_string()
 }
