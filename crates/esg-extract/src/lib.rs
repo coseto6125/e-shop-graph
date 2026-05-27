@@ -6,6 +6,7 @@
 //! is a future addition (see README risks).
 
 pub mod dom_attr;
+pub mod microdata;
 pub mod next_data;
 pub mod platform_json;
 pub mod price;
@@ -24,6 +25,8 @@ enum PageExtract {
     DomAttr(Vec<Value>),
     /// Next.js `__NEXT_DATA__` product-like arrays (SSR / post-render).
     NextData(Vec<Value>),
+    /// schema.org microdata (itemprop) — 91app SSR product pages.
+    Microdata(Vec<microdata::MicrodataProduct>),
     /// schema.org JSON-LD objects.
     JsonLd(Vec<Value>),
     /// Nothing structured found.
@@ -84,6 +87,10 @@ fn extract_page(html: &str) -> (PageExtract, price::PriceScale) {
             return (PageExtract::NextData(products), scale);
         }
     }
+    let md = microdata::extract_microdata_products(html);
+    if !md.is_empty() {
+        return (PageExtract::Microdata(md), scale);
+    }
     let ld = extract_jsonld(html);
     if !ld.objects.is_empty() {
         return (PageExtract::JsonLd(ld.objects), scale);
@@ -108,6 +115,9 @@ fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::Pr
             for p in products {
                 next_data::ingest_next_product(builder, p);
             }
+        }
+        PageExtract::Microdata(products) => {
+            microdata::ingest_microdata(builder, products);
         }
         PageExtract::JsonLd(objects) => {
             for obj in objects {
