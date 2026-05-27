@@ -14,10 +14,19 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() -> Result<()> {
-    let dir = std::env::args()
-        .nth(1)
-        .context("usage: esg <dir-of-html-files>")?;
-    let dir = PathBuf::from(dir);
+    // esg is a pure graph engine: it takes an input HTML dir and an output
+    // graph.bin PATH, and does the graph work. It does NOT interpret the path
+    // — tenancy / org isolation is the CALLER's concern (enoract decides where
+    // each org/bot graph lives by passing a different out path). Out path
+    // defaults to <dir>/graph.bin for local runs.
+    let mut args = std::env::args().skip(1);
+    let dir = PathBuf::from(
+        args.next().context("usage: esg <html_dir> [out_graph_path]")?,
+    );
+    let bin = args
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dir.join("graph.bin"));
 
     // Collect HTML file paths (NOT their contents — build_from_files mmaps
     // them one at a time so peak memory stays bounded regardless of page count).
@@ -42,7 +51,11 @@ fn main() -> Result<()> {
     );
 
     // ── Stage 3: save (rkyv + atomic write) ─────────────────────────────────
-    let bin = dir.join("graph.bin");
+    // Create the caller-supplied output dir if absent (e.g. a fresh
+    // <org>/<bot>/ the caller hasn't materialized yet).
+    if let Some(parent) = bin.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let t_save = Instant::now();
     let bytes = save(&graph, &bin)?;
     println!(

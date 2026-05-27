@@ -40,14 +40,29 @@ The crawler keeps producing markdown for the knowledge base as before; this
 only *additionally* persists raw HTML when a caller opts in. Knowledge base and
 product graph stay separate stores (text vs. structured relations — see README).
 
+## Separation of concerns — esg is a pure engine, NOT multi-tenant
+
+esg knows nothing about org/bot. It takes an input HTML dir and an output
+`graph.bin` path, and does the graph work — it never interprets the path.
+
+**Tenancy is enoract's job.** Org isolation happens naturally because enoract
+passes a DIFFERENT output path per org/bot (it already owns `org_id`/`bot_slug`,
+permissions, and the `{org_slug}/{bot_slug}/` layout). esg treats
+`/data/acme/shop1/graph.bin` and `/data/other/shop2/graph.bin` as two unrelated
+paths — physical isolation, zero cross-org leakage, yet esg stays org-agnostic.
+Enumerating tenants and deleting a tenant's graph (CRUD) are likewise enoract's
+responsibility; esg only builds/queries one graph at the path it's handed. Path-
+traversal hardening on untrusted slugs belongs to enoract, which composes paths.
+
 ## esg-side (done)
 
 ```bash
-esg <raw_html_dir>      # mmaps each .html, builds graph.bin, runs queries
+esg <html_dir> [out_graph_path]   # build graph.bin at the caller-supplied path
 ```
 
 `build_from_files(&[PathBuf])` mmaps one file at a time; peak memory is ~one
-page + the growing graph, independent of page count.
+page + the growing graph, independent of page count. `out_graph_path` defaults
+to `<html_dir>/graph.bin`; enoract supplies an org/bot-scoped path to isolate.
 
 ## Verified end-to-end
 
