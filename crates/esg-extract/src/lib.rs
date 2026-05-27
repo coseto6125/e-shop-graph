@@ -82,34 +82,76 @@ fn extract_page(html: &str) -> (PageExtract, price::PriceScale) {
     (PageExtract::Empty, scale)
 }
 
-/// Parse many pages in parallel (auto-selecting the best source per page),
-/// then fold everything into one graph. Returns the populated builder.
+/// Fold one page's extraction result into the builder.
+fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::PriceScale) {
+    match page {
+        PageExtract::Platform(products) => {
+            for p in products {
+                platform_json::ingest_product(builder, p, scale);
+            }
+        }
+        PageExtract::DomAttr(products) => {
+            for p in products {
+                dom_attr::ingest_ga_product(builder, p, scale);
+            }
+        }
+        PageExtract::JsonLd(objects) => {
+            for obj in objects {
+                ingest_object(builder, obj);
+            }
+        }
+        PageExtract::Empty => {}
+    }
+}
+
+/// Parse in-memory pages in parallel, fold into one graph. Suited to small
+/// batches where holding all HTML in memory is fine.
 pub fn build_from_pages(pages: Vec<String>) -> Result<GraphBuilder> {
     let per_page: Vec<(PageExtract, price::PriceScale)> =
         pages.par_iter().map(|html| extract_page(html)).collect();
-
     let mut builder = GraphBuilder::new();
     for (page, scale) in &per_page {
-        match page {
-            PageExtract::Platform(products) => {
-                for p in products {
-                    platform_json::ingest_product(&mut builder, p, scale);
-                }
-            }
-            PageExtract::DomAttr(products) => {
-                for p in products {
-                    dom_attr::ingest_ga_product(&mut builder, p, scale);
-                }
-            }
-            PageExtract::JsonLd(objects) => {
-                for obj in objects {
-                    ingest_object(&mut builder, obj);
-                }
-            }
-            PageExtract::Empty => {}
-        }
+        ingest_into(&mut builder, page, scale);
     }
     Ok(builder)
+}
+
+/// Memory-bounded build: mmap each HTML file in `paths` one at a time, extract,
+/// fold into the graph, then drop the mapping before the next file. Peak memory
+/// is ~one page + the growing graph — INDEPENDENT of page count, so a 10k-page
+/// crawl with 2MB pages never holds 20GB. This is the enoract handoff path:
+/// the crawler writes one rendered HTML per file, esg streams them here.
+pub fn build_from_files(paths: &[std::path::PathBuf]) -> Result<GraphBuilder> {
+    use std::fs::File;
+    let mut builder = GraphBuilder::new();
+    for path in paths {
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing_warn(path, &e);
+                continue;
+            }
+        };
+        // SAFETY: file is read-only; mapping is dropped at end of iteration.
+        let mmap = match unsafe { memmap2::Mmap::map(&file) } {
+            Ok(m) => m,
+            Err(e) => {
+                tracing_warn(path, &e);
+                continue;
+            }
+        };
+        // HTML may not be valid UTF-8 in the strict sense; lossy is fine for
+        // extraction (we only read ASCII-structured JSON/attrs + text).
+        let html = String::from_utf8_lossy(&mmap);
+        let (page, scale) = extract_page(&html);
+        ingest_into(&mut builder, &page, &scale);
+        // mmap dropped here → page memory released before the next file.
+    }
+    Ok(builder)
+}
+
+fn tracing_warn(path: &std::path::Path, e: &std::io::Error) {
+    eprintln!("esg: skip {path:?}: {e}");
 }
 
 /// Map a single schema.org object onto graph nodes + edges. Currently handles

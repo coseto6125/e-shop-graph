@@ -19,19 +19,20 @@ fn main() -> Result<()> {
         .context("usage: esg <dir-of-html-files>")?;
     let dir = PathBuf::from(dir);
 
-    // ── Read fixtures (this is the "network IO" we exclude from the budget) ──
-    let mut pages = Vec::new();
+    // Collect HTML file paths (NOT their contents — build_from_files mmaps
+    // them one at a time so peak memory stays bounded regardless of page count).
+    let mut paths = Vec::new();
     for entry in std::fs::read_dir(&dir)? {
         let path = entry?.path();
         if path.extension().is_some_and(|e| e == "html" || e == "htm") {
-            pages.push(std::fs::read_to_string(&path)?);
+            paths.push(path);
         }
     }
-    println!("loaded {} pages from {dir:?}", pages.len());
+    println!("found {} pages in {dir:?}", paths.len());
 
-    // ── Stage 1+2: extract + build ──────────────────────────────────────────
+    // ── Stage 1+2: extract + build (memory-bounded, mmap per file) ──────────
     let t_build = Instant::now();
-    let builder = esg_extract::build_from_pages(pages)?;
+    let builder = esg_extract::build_from_files(&paths)?;
     let graph = builder.build();
     let build_ms = t_build.elapsed().as_secs_f64() * 1000.0;
     println!(
