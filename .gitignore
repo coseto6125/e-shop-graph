@@ -1,2 +1,7 @@
 /target
 *.bin
+
+# Pressure-test snapshots of third-party sites — kept locally for dev,
+# never committed (copyright + privacy: rendered HTML may carry tokens/PII).
+fixtures/*_real.html
+fixtures/poya_*.html
