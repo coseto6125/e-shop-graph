@@ -6,6 +6,7 @@
 //! is a future addition (see README risks).
 
 pub mod dom_attr;
+pub mod next_data;
 pub mod platform_json;
 pub mod price;
 
@@ -21,6 +22,8 @@ enum PageExtract {
     Platform(Vec<Value>),
     /// Layer 2: products embedded in `ga-product='{}'` DOM attributes (shopline).
     DomAttr(Vec<Value>),
+    /// Next.js `__NEXT_DATA__` product-like arrays (SSR / post-render).
+    NextData(Vec<Value>),
     /// schema.org JSON-LD objects.
     JsonLd(Vec<Value>),
     /// Nothing structured found.
@@ -75,6 +78,12 @@ fn extract_page(html: &str) -> (PageExtract, price::PriceScale) {
     if !ga.is_empty() {
         return (PageExtract::DomAttr(ga), scale);
     }
+    if let Some(nd) = next_data::find_next_data(html) {
+        let products = next_data::collect_product_arrays(&nd);
+        if !products.is_empty() {
+            return (PageExtract::NextData(products), scale);
+        }
+    }
     let ld = extract_jsonld(html);
     if !ld.objects.is_empty() {
         return (PageExtract::JsonLd(ld.objects), scale);
@@ -93,6 +102,11 @@ fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::Pr
         PageExtract::DomAttr(products) => {
             for p in products {
                 dom_attr::ingest_ga_product(builder, p, scale);
+            }
+        }
+        PageExtract::NextData(products) => {
+            for p in products {
+                next_data::ingest_next_product(builder, p);
             }
         }
         PageExtract::JsonLd(objects) => {
