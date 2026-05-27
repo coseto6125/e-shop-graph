@@ -51,7 +51,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        # esg-py is a PyO3 cdylib (extension-module): linking under plain cargo
+        # on macOS/Windows needs a Python lib that isn't set up here. Its real
+        # build/lint happens in the maturin build-wheels job (release.yml).
+        run: cargo clippy --workspace --exclude esg-py --all-targets --all-features -- -D warnings
 
   test:
     name: Test on ${{ matrix.os }}
@@ -87,7 +90,9 @@ jobs:
           cache-workspace-crates: true
 
       - name: Run tests (nextest)
-        run: cargo nextest run --workspace --all-features --no-fail-fast
+        # Exclude esg-py: see clippy note above (PyO3 cdylib link). Python-side
+        # validation is the maturin wheel build's job.
+        run: cargo nextest run --workspace --exclude esg-py --all-features --no-fail-fast
 
   actionlint:
     name: Lint GitHub Actions workflows

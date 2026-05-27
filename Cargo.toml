@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/esg-core", "crates/esg-extract", "crates/esg-cli"]
+members = ["crates/esg-core", "crates/esg-extract", "crates/esg-cli", "crates/esg-py"]
 resolver = "2"
 
 [workspace.package]

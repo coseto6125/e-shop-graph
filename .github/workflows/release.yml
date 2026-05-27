@@ -188,17 +188,62 @@ jobs:
       - name: Publish esg-cli
         run: cargo publish -p esg-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+  # ==================== Build Python wheels (maturin) ====================
+  # esg-py (PyO3 abi3-py38) → one wheel per platform covering CPython 3.8+.
+  # maturin-action builds inside manylinux for the linux targets so the wheels
+  # are broadly installable. Wheels are uploaded as artifacts, then the
+  # publish-pypi job collects + uploads them. Gated on PUBLISH_PYPI so the
+  # heavy matrix only runs when a PyPI release is actually wanted.
+  build-wheels:
+    name: Build wheel ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    if: vars.PUBLISH_PYPI == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64
+            os: ubuntu-latest
+            manylinux: auto
+          - target: aarch64
+            os: ubuntu-24.04-arm
+            manylinux: auto
+          - target: x86_64
+            os: macos-15
+          - target: aarch64
+            os: macos-latest
+          - target: x64
+            os: windows-2025
+    steps:
+      - name: Harden the runner (Audit all outbound calls)
+        uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+        with:
+          egress-policy: audit
+
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@aef21716ff3dcae8a1c301d23ec3e4446972a6e3 # v1.49.4
+        with:
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist -m crates/esg-py/Cargo.toml
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-${{ matrix.os }}-${{ matrix.target }}
+          path: dist/*.whl
+          if-no-files-found: error
+
   # ==================== Publish to PyPI (Trusted Publishing) ====================
-  # esg 目前是純 Rust；PyPI 發佈需要先有 esg-py（PyO3 binding）+ maturin。
-  # 此 job 用 OIDC Trusted Publishing（無 token）——在 PyPI 專案設定
-  # 新增 publisher：repo=coseto6125/e-shop-graph, workflow=release.yml,
-  # environment=pypi。然後 Settings → Variables → Actions → `PUBLISH_PYPI = 1`。
-  #
-  # ⚠️ build-wheels 步驟現為 placeholder。esg-py crate 就緒後，改成 maturin
-  # 跨平台 build（manylinux + macos + windows），把 *.whl 收進 wheelhouse/。
+  # OIDC Trusted Publishing (no token). In the PyPI project settings add a
+  # publisher: repo=coseto6125/e-shop-graph, workflow=release.yml,
+  # environment=pypi. Then Settings → Variables → Actions → `PUBLISH_PYPI = 1`.
   publish-pypi:
     name: Publish to PyPI
-    needs: [build]
+    needs: [build-wheels]
     runs-on: ubuntu-latest
     if: vars.PUBLISH_PYPI == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
     environment: pypi
@@ -211,14 +256,12 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Build wheels (maturin) — TODO once esg-py exists
-        run: |
-          echo "::error::publish-pypi enabled but esg-py PyO3 crate not built yet."
-          echo "Add maturin wheel build here, then remove this guard."
-          exit 1
+      - name: Download all wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: wheel-*
+          path: wheelhouse
+          merge-multiple: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@76f52bc884231f62b9a034ebfe128415bbaabdfc # v1.12.4

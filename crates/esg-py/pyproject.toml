@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "e-shop-graph"
+dynamic = ["version"]
+description = "Zero-copy e-commerce product knowledge graph (rkyv + CSR + Cypher), with Python bindings"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "coseto6125" }]
+keywords = ["ecommerce", "knowledge-graph", "cypher", "rkyv", "scraping"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Libraries",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Repository = "https://github.com/coseto6125/e-shop-graph"
+
+[tool.maturin]
+# The Python module is named `esg` (matches #[pymodule] fn esg). abi3 keeps it
+# to one wheel per platform across CPython 3.8+.
+module-name = "esg"
+features = ["pyo3/extension-module"]
