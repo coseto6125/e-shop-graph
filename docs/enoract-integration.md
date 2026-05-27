@@ -9,36 +9,36 @@ crawler writes one rendered HTML per page; esg streams them via
 This avoids both OOM (a 10k-page crawl at 2MB/page would be ~20GB if held in
 memory) and shipping GB of strings across a PyO3 boundary.
 
-## enoract-side change (minimal, opt-in)
+## enoract-side change (minimal, env-driven, opt-in)
 
-Target: `enoract/console/knowledge/sources/web/crawler.py`. Add an optional
-`raw_html_dir: Path | None = None` parameter, threaded `crawl` → `_run_loop` →
-`_process`. When set, `_process` writes the rendered HTML (the value live at
-line ~504, AFTER `_rescue_if_spa`) to `<raw_html_dir>/<sha256(url)>.html`.
-Default `None` preserves existing behavior exactly.
+Target: `enoract/console/knowledge/sources/web/crawler.py`. Apply with the
+idempotent helper (verified against the real file; aborts if any anchor isn't
+unique):
 
-```python
-# top of file
-import hashlib
-from pathlib import Path
-
-# crawl(...) signature: add
-#     raw_html_dir: Path | None = None,
-# and pass it into _run_loop(...).
-
-# _run_loop(...) signature: add
-#     raw_html_dir: Path | None,
-
-# inside _process, right after:  html = await _rescue_if_spa(url, html)
-if raw_html_dir is not None and html:
-    raw_html_dir.mkdir(parents=True, exist_ok=True)
-    name = hashlib.sha256(url.encode()).hexdigest()[:16] + ".html"
-    (raw_html_dir / name).write_text(html, encoding="utf-8")
+```bash
+python docs/apply_enoract_handoff.py \
+    enoract/console/knowledge/sources/web/crawler.py
 ```
 
-The crawler keeps producing markdown for the knowledge base as before; this
-only *additionally* persists raw HTML when a caller opts in. Knowledge base and
-product graph stay separate stores (text vs. structured relations — see README).
+It makes exactly TWO edits — an import and a persist block in `_process` (the
+single funnel all `crawl*`/`_run_loop` paths flow through). It touches NO public
+signature or call site, so there are no collisions across the several `crawl*`
+functions. The handoff is driven by an env var:
+
+```python
+# inside _process, right after:  html = await _rescue_if_spa(url, html)
+_esg_dir = os.environ.get("ESG_RAW_HTML_DIR")
+if _esg_dir and html:
+    _d = Path(_esg_dir); _d.mkdir(parents=True, exist_ok=True)
+    _fname = hashlib.sha256(url.encode()).hexdigest()[:16] + ".html"
+    (_d / _fname).write_text(html, encoding="utf-8")
+```
+
+Set `ESG_RAW_HTML_DIR` (to an org/bot-scoped path — tenancy is enoract's call)
+and each rendered page lands there as one file; unset = exact original behavior.
+The crawler keeps producing markdown for the knowledge base as before; this only
+*additionally* persists raw HTML. Knowledge base and product graph stay separate
+stores (text vs. structured relations — see README).
 
 ## Separation of concerns — esg is a pure engine, NOT multi-tenant
 
