@@ -54,17 +54,17 @@ const PLATFORM_HTML: &str = r#"<!doctype html><html><body>
 </body></html>"#;
 
 #[test]
-fn jsonld_product_inlines_price_cents() {
+fn jsonld_product_inlines_price() {
     // Regression: in 0.2.0 this returned None because ingest_object never
     // received the page's PriceScale. Now the same code path used by every
-    // other source produces normalized price props.
-    let rows = cypher_rows(JSONLD_HTML, "MATCH (p:Product) RETURN p.price_cents");
+    // other source produces a normalized whole-unit `price` string. TWD is
+    // zero-decimal so JSON `"4200"` and a hypothetical `4200.00` both
+    // render as `"4200"` (no `.00`).
+    let rows = cypher_rows(JSONLD_HTML, "MATCH (p:Product) RETURN p.price");
     assert_eq!(rows.len(), 1, "expected one Product node");
-    // 4200 TWD whole units → 4200 cents (TWD has no minor unit), or 420000 if
-    // the scale decides minor-unit semantics. Either way: NOT None.
     assert!(
-        !matches!(rows[0][0], Value::Null),
-        "JSON-LD Product.price_cents should be set, got {:?}",
+        matches!(&rows[0][0], Value::Str(s) if s == "4200"),
+        "JSON-LD Product.price should be \"4200\", got {:?}",
         rows[0][0]
     );
 }
@@ -132,17 +132,21 @@ fn jsonld_falls_back_to_url_for_id_when_no_at_id_or_sku() {
 // source added to `extract_page` must satisfy this matrix.
 
 #[test]
-fn price_cents_present_across_sources() {
+fn price_present_across_sources() {
     for (label, html) in [
         ("jsonld", JSONLD_HTML),
         ("microdata", MICRODATA_HTML),
         ("platform", PLATFORM_HTML),
     ] {
-        let rows = cypher_rows(html, "MATCH (p:Product) RETURN p.price_cents");
+        let rows = cypher_rows(html, "MATCH (p:Product) RETURN p.price");
         assert_eq!(rows.len(), 1, "[{label}] one product expected");
+        // Every extractor must surface a non-empty `price` string. The
+        // fixture is the same 4200 TWD product so every source renders
+        // `"4200"` — that's the actual parity claim, not just non-Null.
         assert!(
-            !matches!(rows[0][0], Value::Null),
-            "[{label}] Product.price_cents missing — schema parity broken",
+            matches!(&rows[0][0], Value::Str(s) if !s.is_empty()),
+            "[{label}] Product.price missing or non-string — schema parity broken: {:?}",
+            rows[0][0],
         );
     }
 }

@@ -22,6 +22,10 @@ scraper = "0.20"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memmap2 = "0.9"
 anyhow = "1"
+# rust_decimal for monetary values: avoids the f64 rounding that turned 690.00
+# into 68999.999... cents on certain code paths. `serde-float` lets us read a
+# JSON number directly into Decimal without going through f64 first.
+rust_decimal = { version = "1", features = ["serde-with-float"] }
 
 [profile.release]
 lto = "thin"

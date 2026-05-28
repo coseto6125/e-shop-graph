@@ -91,8 +91,8 @@ pub fn ingest_next_product(b: &mut GraphBuilder, p: &Value, scale: &crate::price
     }
 }
 
-/// Serialize an object's JSON, injecting normalized `price_cents` / `currency`
-/// / `price_confident` / `price_score` when a price field scores. Mirrors
+/// Serialize an object's JSON, injecting normalized `price` / `currency` /
+/// `price_confident` / `price_score` when a price field scores. Mirrors
 /// `platform_json::with_normalized_price` for the __NEXT_DATA__ key shapes.
 fn props_with_price(
     obj: &serde_json::Map<String, Value>,
@@ -103,12 +103,15 @@ fn props_with_price(
         .find_map(|k| obj.get(*k));
     let mut map = obj.clone();
     if let Some(v) = scale.verdict(price_field, None) {
-        map.insert("price_cents".into(), v.cents.into());
-        if !v.currency.is_empty() {
-            map.insert("currency".into(), v.currency.into());
+        let confident = v.confident();
+        let score = v.score;
+        let currency = v.currency;
+        map.insert("price".into(), Value::String(v.price));
+        if !currency.is_empty() {
+            map.insert("currency".into(), currency.into());
         }
-        map.insert("price_confident".into(), v.confident().into());
-        map.insert("price_score".into(), v.score.into());
+        map.insert("price_confident".into(), confident.into());
+        map.insert("price_score".into(), score.into());
     }
     Value::Object(map).to_string()
 }
