@@ -128,7 +128,11 @@ impl PriceScale {
     /// Returns `None` when the field has no extractable magnitude. Returns a
     /// verdict whose `price` is the whole-unit string formatted per the
     /// currency's minor-unit convention.
-    pub fn verdict(&self, field: Option<&Value>, peer_whole: Option<Decimal>) -> Option<PriceVerdict> {
+    pub fn verdict(
+        &self,
+        field: Option<&Value>,
+        peer_whole: Option<Decimal>,
+    ) -> Option<PriceVerdict> {
         let n = decimal_of(field?)?;
 
         // Detect whether the JSON number was already in minor units (cents);
@@ -537,10 +541,12 @@ mod tests {
         assert!(!scale.has_anchors);
         // variant 79000 against whole-unit peer 790 → divided back to 790,
         // confidently. Currency is empty → 2-dp default → "790".
-        let v = scale.verdict(Some(&json!(79000)), Some(dec("790"))).unwrap();
+        let v = scale
+            .verdict(Some(&json!(79000)), Some(dec("790")))
+            .unwrap();
         assert_eq!(v.price, "790");
         assert!(v.confident()); // score 3 from cross-field alone
-        // whole-unit value against same peer → unchanged.
+                                // whole-unit value against same peer → unchanged.
         let w = scale.verdict(Some(&json!(790)), Some(dec("790"))).unwrap();
         assert_eq!((w.price.as_str(), w.confident()), ("790", true));
     }
