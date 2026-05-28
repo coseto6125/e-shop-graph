@@ -616,11 +616,9 @@ fn project(graph: &ArchivedGraph, node_idx: u32, prop: Option<&str>) -> Value {
 }
 
 /// Resolve an archived `Str` slice against the archived string pool, borrowing
-/// straight out of the mmap'd bytes — no copy. Returns `&str` so callers that
-/// only read (JSON parse, comparison) pay nothing; only those that must hand
-/// back an owned `Value::Str` call `.to_string()`. The pool's UTF-8 validity is
-/// checked once at load (`store::validate_invariants`), so a lossy decode here
-/// would never fire — `from_utf8` with a safe fallback keeps it total anyway.
+/// straight out of the mmap'd bytes — no copy. `from_utf8` (not lossy) because
+/// the pool's bounds are validated at load; the `""` fallback only keeps the
+/// function total against a non-UTF-8 pool that validation didn't reject.
 fn arch_str<'g>(graph: &'g ArchivedGraph, s: &crate::graph::ArchivedStr) -> &'g str {
     let off = s.off.to_native() as usize;
     let len = s.len.to_native() as usize;
