@@ -52,6 +52,17 @@ pub struct PriceScale {
 }
 
 impl PriceScale {
+    /// A no-signal scale, for pages that yielded no products — skips the
+    /// full visible-text scan + currency detection that `from_html` does.
+    pub fn empty() -> Self {
+        PriceScale {
+            unit_set: HashSet::new(),
+            recurring: HashSet::new(),
+            has_anchors: false,
+            currency: "",
+        }
+    }
+
     pub fn from_html(html: &str) -> Self {
         // Currency-symbol anchors only make sense in RENDERED text — the prices
         // a human sees. Scanning the whole page wastes work (on doni, <script>

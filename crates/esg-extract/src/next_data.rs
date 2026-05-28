@@ -51,8 +51,10 @@ fn is_product_like(v: &Value) -> bool {
     has(&["name", "title"]) && has(&["price", "amount", "cost"])
 }
 
-/// Ingest a product-like object discovered under __NEXT_DATA__.
-pub fn ingest_next_product(b: &mut GraphBuilder, p: &Value) {
+/// Ingest a product-like object discovered under __NEXT_DATA__. Prices found
+/// under common keys are run through the page `PriceScale` for the same
+/// cents-normalization + confidence scoring as the other extractors.
+pub fn ingest_next_product(b: &mut GraphBuilder, p: &Value, scale: &crate::price::PriceScale) {
     let obj = match p.as_object() {
         Some(o) => o,
         None => return,
@@ -62,27 +64,53 @@ pub fn ingest_next_product(b: &mut GraphBuilder, p: &Value) {
     if id.is_empty() {
         return;
     }
-    let product_idx = b.upsert_node(NodeKind::Product, &id, &name, &p.to_string());
+    let product_idx = b.upsert_node(NodeKind::Product, &id, &name, &props_with_price(obj, scale));
 
     // Variant arrays under common keys.
     for vkey in ["variants", "variations", "skus", "options"] {
         if let Some(vs) = obj.get(vkey).and_then(Value::as_array) {
             for v in vs {
-                let vid = v
-                    .as_object()
-                    .and_then(|o| first_str(o, &["id", "sku"]))
+                let vobj = match v.as_object() {
+                    Some(o) => o,
+                    None => continue,
+                };
+                let vid = first_str(vobj, &["id", "sku"])
                     .map(|s| format!("{id}#v{s}"))
                     .unwrap_or_else(|| format!("{id}#v"));
-                let vtitle = v
-                    .as_object()
-                    .and_then(|o| first_str(o, &["title", "name"]))
-                    .unwrap_or_default();
-                b.upsert_node(NodeKind::Variant, &vid, &vtitle, &v.to_string());
+                let vtitle = first_str(vobj, &["title", "name"]).unwrap_or_default();
+                b.upsert_node(
+                    NodeKind::Variant,
+                    &vid,
+                    &vtitle,
+                    &props_with_price(vobj, scale),
+                );
                 b.add_edge(product_idx, RelType::HasVariant, &vid);
             }
             break;
         }
     }
+}
+
+/// Serialize an object's JSON, injecting normalized `price_cents` / `currency`
+/// / `price_confident` / `price_score` when a price field scores. Mirrors
+/// `platform_json::with_normalized_price` for the __NEXT_DATA__ key shapes.
+fn props_with_price(
+    obj: &serde_json::Map<String, Value>,
+    scale: &crate::price::PriceScale,
+) -> String {
+    let price_field = ["price", "salePrice", "amount", "priceValue"]
+        .iter()
+        .find_map(|k| obj.get(*k));
+    let mut map = obj.clone();
+    if let Some(v) = scale.verdict(price_field, None) {
+        map.insert("price_cents".into(), v.cents.into());
+        if !v.currency.is_empty() {
+            map.insert("currency".into(), v.currency.into());
+        }
+        map.insert("price_confident".into(), v.confident().into());
+        map.insert("price_score".into(), v.score.into());
+    }
+    Value::Object(map).to_string()
 }
 
 fn first_str(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {

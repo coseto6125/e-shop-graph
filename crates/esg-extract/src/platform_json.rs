@@ -14,12 +14,26 @@ use crate::price::PriceScale;
 use esg_core::{GraphBuilder, NodeKind, RelType};
 use serde_json::Value;
 
-/// Find and parse the first balanced `"products":[ ... ]` array in the page.
-/// Returns the parsed array, or None if absent / unparseable.
+/// Candidate keys for the inline product array, in priority order. `products`
+/// is the dominant Shopify-compatible name; the rest cover stores that relabel
+/// it. Tried in order — the first that parses as a NON-EMPTY array wins, so a
+/// broader name like `items` only acts as a fallback and never shadows
+/// `products` on a page that has both.
+const PRODUCT_ARRAY_KEYS: [&str; 4] = ["\"products\"", "\"productList\"", "\"goods\"", "\"items\""];
+
+/// Find and parse the first balanced product array in the page, trying each
+/// candidate key in priority order. Returns the parsed array, or None.
 pub fn find_products_array(html: &str) -> Option<Vec<Value>> {
-    let key = html.find("\"products\"")?;
+    PRODUCT_ARRAY_KEYS
+        .iter()
+        .find_map(|key| parse_array_after_key(html, key).filter(|a| !a.is_empty()))
+}
+
+/// Parse the first balanced `[ ... ]` array following `key` in `html`.
+fn parse_array_after_key(html: &str, key: &str) -> Option<Vec<Value>> {
+    let pos = html.find(key)?;
     // Advance to the opening '[' after the key (skip `":` and whitespace).
-    let bracket = html[key..].find('[')? + key;
+    let bracket = html[pos..].find('[')? + pos;
     let bytes = html.as_bytes();
     let mut depth = 0i32;
     let mut in_str = false;

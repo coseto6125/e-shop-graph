@@ -23,7 +23,7 @@ fn build_graph(py: Python<'_>, pages: Vec<String>, out_path: &str) -> PyResult<u
     // CPU-bound Rust (parse + rayon build + rkyv write) touches no Python
     // objects — release the GIL so the caller's other threads keep running.
     py.allow_threads(|| {
-        let builder = esg_extract::build_from_pages(pages).map_err(err)?;
+        let builder = esg_extract::build_from_pages(&pages).map_err(err)?;
         write_graph(&builder.build(), &out)
     })
 }

@@ -40,13 +40,20 @@ pub struct PageRecords {
     pub objects: Vec<Value>,
 }
 
+static JSONLD_SEL: std::sync::LazyLock<Selector> =
+    std::sync::LazyLock::new(|| Selector::parse(r#"script[type="application/ld+json"]"#).unwrap());
+
 /// Pull every JSON-LD object out of one HTML document. Flattens `@graph`
 /// containers and arrays into a flat object list.
 pub fn extract_jsonld(html: &str) -> PageRecords {
-    let doc = Html::parse_document(html);
-    let sel = Selector::parse(r#"script[type="application/ld+json"]"#).unwrap();
+    jsonld_from_dom(&Html::parse_document(html))
+}
+
+/// JSON-LD extraction from an already-parsed DOM, so `extract_page` can share
+/// one `Html::parse_document` between the microdata and JSON-LD fallbacks.
+fn jsonld_from_dom(doc: &Html) -> PageRecords {
     let mut objects = Vec::new();
-    for el in doc.select(&sel) {
+    for el in doc.select(&JSONLD_SEL) {
         let text = el.text().collect::<String>();
         let Ok(val) = serde_json::from_str::<Value>(&text) else {
             continue;
@@ -71,35 +78,41 @@ fn collect_objects(val: Value, out: &mut Vec<Value>) {
     }
 }
 
-/// Try extraction sources in priority order: platform product JSON first
-/// (richest), then schema.org JSON-LD. DOM/microdata fallback is future work.
-/// Each page carries its own `PriceScale` (visible prices) for unit inference.
+/// Try extraction sources in priority order. The cheap byte-scan sources
+/// (platform JSON, `ga-product`, `__NEXT_DATA__`) are attempted first without
+/// touching the DOM or the price scale; the scale (a full visible-text scan)
+/// is built only once a source actually yields products. The DOM-based
+/// fallbacks (microdata, JSON-LD) share a single `Html::parse_document`.
 fn extract_page(html: &str) -> (PageExtract, price::PriceScale) {
-    let scale = price::PriceScale::from_html(html);
+    let with_scale = |page| (page, price::PriceScale::from_html(html));
+
     if let Some(products) = platform_json::find_products_array(html) {
         if !products.is_empty() {
-            return (PageExtract::Platform(products), scale);
+            return with_scale(PageExtract::Platform(products));
         }
     }
     let ga = dom_attr::find_ga_products(html);
     if !ga.is_empty() {
-        return (PageExtract::DomAttr(ga), scale);
+        return with_scale(PageExtract::DomAttr(ga));
     }
     if let Some(nd) = next_data::find_next_data(html) {
         let products = next_data::collect_product_arrays(&nd);
         if !products.is_empty() {
-            return (PageExtract::NextData(products), scale);
+            return with_scale(PageExtract::NextData(products));
         }
     }
-    let md = microdata::extract_microdata_products(html);
+
+    // DOM fallbacks: parse once, reuse for both microdata and JSON-LD.
+    let doc = Html::parse_document(html);
+    let md = microdata::extract_from_dom(&doc);
     if !md.is_empty() {
-        return (PageExtract::Microdata(md), scale);
+        return with_scale(PageExtract::Microdata(md));
     }
-    let ld = extract_jsonld(html);
+    let ld = jsonld_from_dom(&doc);
     if !ld.objects.is_empty() {
-        return (PageExtract::JsonLd(ld.objects), scale);
+        return with_scale(PageExtract::JsonLd(ld.objects));
     }
-    (PageExtract::Empty, scale)
+    (PageExtract::Empty, price::PriceScale::empty())
 }
 
 /// Fold one page's extraction result into the builder.
@@ -117,11 +130,11 @@ fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::Pr
         }
         PageExtract::NextData(products) => {
             for p in products {
-                next_data::ingest_next_product(builder, p);
+                next_data::ingest_next_product(builder, p, scale);
             }
         }
         PageExtract::Microdata(products) => {
-            microdata::ingest_microdata(builder, products);
+            microdata::ingest_microdata(builder, products, scale);
         }
         PageExtract::JsonLd(objects) => {
             for obj in objects {
@@ -133,8 +146,9 @@ fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::Pr
 }
 
 /// Parse in-memory pages in parallel, fold into one graph. Suited to small
-/// batches where holding all HTML in memory is fine.
-pub fn build_from_pages(pages: Vec<String>) -> Result<GraphBuilder> {
+/// batches where holding all HTML in memory is fine. Borrows the pages — it
+/// only reads them, so callers keep ownership.
+pub fn build_from_pages(pages: &[String]) -> Result<GraphBuilder> {
     let per_page: Vec<(PageExtract, price::PriceScale)> =
         pages.par_iter().map(|html| extract_page(html)).collect();
     let mut builder = GraphBuilder::new();
