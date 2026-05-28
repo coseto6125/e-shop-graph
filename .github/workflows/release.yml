@@ -75,6 +75,9 @@ jobs:
           cache-on-failure: true
 
       - name: Build release binary
+        # bash on every platform: ${BIN_NAME} is a bash-style env ref that the
+        # windows runner's default PowerShell would expand to empty.
+        shell: bash
         run: cargo build --release --bin "${BIN_NAME}" --target ${{ matrix.target }}
 
       - name: Package (tar.gz)
@@ -238,15 +241,16 @@ jobs:
           if-no-files-found: error
 
   # ==================== Publish to PyPI (Trusted Publishing) ====================
-  # OIDC Trusted Publishing (no token). In the PyPI project settings add a
-  # publisher: repo=coseto6125/e-shop-graph, workflow=release.yml,
-  # environment=pypi. Then Settings → Variables → Actions → `PUBLISH_PYPI = 1`.
+  # OIDC Trusted Publishing (no token). The PyPI publisher is configured WITHOUT
+  # an environment, so this job must not declare one either — GitHub's OIDC
+  # `sub` claim would otherwise carry `:environment:pypi` and fail to match
+  # (invalid-publisher). Publisher claims: repo=coseto6125/e-shop-graph,
+  # workflow=release.yml. Enable via Settings → Variables → `PUBLISH_PYPI = 1`.
   publish-pypi:
     name: Publish to PyPI
     needs: [build-wheels]
     runs-on: ubuntu-latest
     if: vars.PUBLISH_PYPI == '1' && startsWith(github.ref, 'refs/tags/') && (github.event_name != 'workflow_dispatch' || inputs.dry_run != 'true')
-    environment: pypi
     permissions:
       contents: read
       id-token: write       # OIDC for PyPI Trusted Publishing
