@@ -28,6 +28,13 @@ static IMAGE_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("[itemprop='image']").unwrap());
 static OG_URL_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("meta[property='og:url']").unwrap());
+// Per-product container: an itemscope whose itemtype names a Product. A listing
+// page renders one of these per card, so grouping by container stops one
+// product's price binding to another's name.
+static PRODUCT_SCOPE_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("[itemscope][itemtype*='Product']").unwrap());
+static URL_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("[itemprop='url']").unwrap());
 
 pub fn extract_microdata_products(html: &str) -> Vec<MicrodataProduct> {
     extract_from_dom(&Html::parse_document(html))
@@ -51,38 +58,67 @@ pub fn extract_microdata_products(html: &str) -> Vec<MicrodataProduct> {
 /// for an entire shop. Falling back to the element's text covers both forms
 /// without changing the contract on pages that do use `<meta>`.
 pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
-    let value = |sel: &Selector| {
-        doc.select(sel).find_map(|el| {
-            // Property-typed carriers, in spec priority order. `content` is
-            // the canonical microdata carrier (`<meta>`); `src` / `href` are
-            // the implicit carriers for media / link elements. Element text
-            // is the last-resort fallback for plain elements like `<h1>`.
-            let v = el.value();
-            v.attr("content")
-                .or_else(|| v.attr("src"))
-                .or_else(|| v.attr("href"))
-                .map(str::to_string)
-                .or_else(|| {
-                    let text = el.text().collect::<String>();
-                    let trimmed = text.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        Some(trimmed.to_string())
-                    }
-                })
+    // og:url is page-level (one canonical URL), so read it once from the whole
+    // document and share it; per-product itemprops are read within each scope.
+    let page_url = doc.select(&OG_URL_SEL).find_map(itemprop_value);
+
+    // Listing / category pages mark each card with a Product itemscope. Extract
+    // one MicrodataProduct per container, reading each itemprop ONLY within that
+    // container's subtree so product A's price can't bind to product B's name.
+    let scoped: Vec<MicrodataProduct> = doc
+        .select(&PRODUCT_SCOPE_SEL)
+        .filter_map(|scope| {
+            let name = scope.select(&NAME_SEL).find_map(itemprop_value)?;
+            Some(MicrodataProduct {
+                name,
+                price: scope.select(&PRICE_SEL).find_map(itemprop_value),
+                currency: scope.select(&CURRENCY_SEL).find_map(itemprop_value),
+                image: scope.select(&IMAGE_SEL).find_map(itemprop_value),
+                // Per-card product URL (`itemprop=url`) so each listed product
+                // has a distinct id; fall back to the page's canonical og:url.
+                url: scope
+                    .select(&URL_SEL)
+                    .find_map(itemprop_value)
+                    .or_else(|| page_url.clone()),
+            })
         })
-    };
-    let Some(name) = value(&NAME_SEL) else {
+        .collect();
+    if !scoped.is_empty() {
+        return scoped;
+    }
+
+    // No explicit Product itemscope (a single-product page that just sprinkles
+    // itemprops): fall back to reading the whole document as one product.
+    let Some(name) = doc.select(&NAME_SEL).find_map(itemprop_value) else {
         return Vec::new();
     };
     vec![MicrodataProduct {
         name,
-        price: value(&PRICE_SEL),
-        currency: value(&CURRENCY_SEL),
-        image: value(&IMAGE_SEL),
-        url: value(&OG_URL_SEL),
+        price: doc.select(&PRICE_SEL).find_map(itemprop_value),
+        currency: doc.select(&CURRENCY_SEL).find_map(itemprop_value),
+        image: doc.select(&IMAGE_SEL).find_map(itemprop_value),
+        url: page_url,
     }]
+}
+
+/// Read the value an `itemprop` element carries: the `content`/`src`/`href`
+/// attribute in spec priority order, else the element's trimmed text. Returns
+/// None for an empty text element with no carrier attribute.
+fn itemprop_value(el: scraper::ElementRef) -> Option<String> {
+    let v = el.value();
+    v.attr("content")
+        .or_else(|| v.attr("src"))
+        .or_else(|| v.attr("href"))
+        .map(str::to_string)
+        .or_else(|| {
+            let text = el.text().collect::<String>();
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
 }
 
 pub fn ingest_microdata(

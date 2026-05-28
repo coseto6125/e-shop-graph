@@ -83,6 +83,10 @@ pub enum RelType {
     Author,
     /// Product -> Variant. Appended at the END (rkyv discriminant stability).
     HasVariant,
+    /// Category -> Category (breadcrumb parent chain, schema.org `broader`).
+    /// `Product -[:Category]-> Category` reuses `Category`; this only models the
+    /// parent edge BETWEEN categories. Appended at the END (rkyv stability).
+    BroaderCategory,
 }
 
 impl RelType {
@@ -98,6 +102,7 @@ impl RelType {
             "Category" => Self::Category,
             "Author" => Self::Author,
             "HasVariant" => Self::HasVariant,
+            "BroaderCategory" => Self::BroaderCategory,
             _ => return None,
         })
     }
