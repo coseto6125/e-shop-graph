@@ -12,6 +12,14 @@ use crate::schema::{ArchivedNodeKind, ArchivedRelType, NodeKind, RelType};
 type Binding = Vec<u32>;
 
 pub fn execute(graph: &ArchivedGraph, q: &Query) -> Result<QueryResult, String> {
+    // Per-query cache of each node's parsed `props` JSON. read_prop is hit once
+    // per (binding, property) — a WHERE with k property refs over N bindings did
+    // k·N full re-parses of the same blob, and ORDER BY/aggregate re-parsed per
+    // comparison. Caching the parsed Value per node collapses that to one parse
+    // per distinct node touched. Cleared at the start of each execute() so a
+    // reused thread never sees a stale node_idx from a prior query/graph.
+    PROPS_CACHE.with(|c| c.borrow_mut().clear());
+
     // ── Seed: all nodes matching the first node pattern ──────────────────────
     let mut bindings: Vec<Binding> = Vec::new();
     let first = &q.pattern.nodes[0];
@@ -151,17 +159,32 @@ fn sort_bindings(
             .ok_or_else(|| format!("ORDER BY references unknown variable {}", oi.var))?;
         terms.push((pos, prop, oi.desc));
     }
-    bindings.sort_by(|a, b| {
-        for (pos, prop, desc) in &terms {
-            let va = project(graph, a[*pos], prop.as_deref());
-            let vb = project(graph, b[*pos], prop.as_deref());
-            let ord = order_values(&va, &vb);
+    // Decorate-sort: project each binding's sort keys ONCE up front, then sort
+    // by the cached keys. The naive comparator called project() — which parses
+    // the node's props JSON — inside every comparison, so a sort did O(N·log N)
+    // JSON parses; this drops it to O(N·terms) parses.
+    let mut keyed: Vec<(Vec<Value>, Binding)> = bindings
+        .iter()
+        .map(|b| {
+            let keys = terms
+                .iter()
+                .map(|(pos, prop, _)| project(graph, b[*pos], prop.as_deref()))
+                .collect();
+            (keys, b.clone())
+        })
+        .collect();
+    keyed.sort_by(|(ka, _), (kb, _)| {
+        for (i, (_, _, desc)) in terms.iter().enumerate() {
+            let ord = order_values(&ka[i], &kb[i]);
             if ord != std::cmp::Ordering::Equal {
                 return if *desc { ord.reverse() } else { ord };
             }
         }
         std::cmp::Ordering::Equal
     });
+    for (slot, (_, b)) in bindings.iter_mut().zip(keyed) {
+        *slot = b;
+    }
     Ok(())
 }
 
@@ -448,20 +471,30 @@ fn inline_props_match(graph: &ArchivedGraph, node_idx: u32, pat: &NodePat) -> bo
     })
 }
 
+thread_local! {
+    /// node_idx -> parsed props JSON (None = the blob didn't parse). Scoped to
+    /// one execute() call; see the clear() at the top of execute().
+    static PROPS_CACHE: std::cell::RefCell<std::collections::HashMap<u32, Option<serde_json::Value>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 /// Read `prop` off a node: `name`/`kind` are intrinsic; everything else comes
-/// from the node's `props` JSON blob.
+/// from the node's `props` JSON blob (parsed once per node per query, cached).
 fn read_prop(graph: &ArchivedGraph, node_idx: u32, prop: &str) -> Value {
     let node = &graph.nodes[node_idx as usize];
     match prop {
-        "name" => Value::Str(arch_str(graph, &node.name)),
+        "name" => Value::Str(arch_str(graph, &node.name).to_string()),
         "kind" => Value::Str(format!("{:?}", node.kind)),
-        _ => {
-            let props_json = arch_str(graph, &node.props);
-            match serde_json::from_str::<serde_json::Value>(&props_json) {
-                Ok(v) => json_to_value(prop, v.get(prop)),
-                Err(_) => Value::Null,
+        _ => PROPS_CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            let parsed = cache.entry(node_idx).or_insert_with(|| {
+                serde_json::from_str::<serde_json::Value>(arch_str(graph, &node.props)).ok()
+            });
+            match parsed {
+                Some(v) => json_to_value(prop, v.get(prop)),
+                None => Value::Null,
             }
-        }
+        }),
     }
 }
 
@@ -538,15 +571,20 @@ fn project(graph: &ArchivedGraph, node_idx: u32, prop: Option<&str>) -> Value {
             Value::NodeRef {
                 idx: node_idx,
                 kind: format!("{:?}", node.kind),
-                name: arch_str(graph, &node.name),
+                name: arch_str(graph, &node.name).to_string(),
             }
         }
     }
 }
 
-/// Resolve an archived `Str` slice against the archived string pool.
-fn arch_str(graph: &ArchivedGraph, s: &crate::graph::ArchivedStr) -> String {
+/// Resolve an archived `Str` slice against the archived string pool, borrowing
+/// straight out of the mmap'd bytes — no copy. Returns `&str` so callers that
+/// only read (JSON parse, comparison) pay nothing; only those that must hand
+/// back an owned `Value::Str` call `.to_string()`. The pool's UTF-8 validity is
+/// checked once at load (`store::validate_invariants`), so a lossy decode here
+/// would never fire — `from_utf8` with a safe fallback keeps it total anyway.
+fn arch_str<'g>(graph: &'g ArchivedGraph, s: &crate::graph::ArchivedStr) -> &'g str {
     let off = s.off.to_native() as usize;
     let len = s.len.to_native() as usize;
-    String::from_utf8_lossy(&graph.string_pool[off..off + len]).into_owned()
+    std::str::from_utf8(&graph.string_pool[off..off + len]).unwrap_or("")
 }
