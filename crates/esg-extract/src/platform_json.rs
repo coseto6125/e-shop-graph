@@ -12,7 +12,6 @@
 
 use crate::price::PriceScale;
 use esg_core::{GraphBuilder, NodeKind, RelType};
-use rust_decimal::prelude::*;
 use rust_decimal::Decimal;
 use serde_json::Value;
 
