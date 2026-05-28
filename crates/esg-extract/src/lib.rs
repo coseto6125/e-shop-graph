@@ -228,13 +228,9 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
     // ships with normalized price props. JSON-LD `offers` may be an Offer
     // object or a list of Offers; we take the first (typical retailer
     // layout — one offer per product).
-    let offer_obj = obj.get("offers").and_then(|o| {
-        if o.is_array() {
-            o.get(0)
-        } else {
-            Some(o)
-        }
-    });
+    let offer_obj = obj
+        .get("offers")
+        .and_then(|o| if o.is_array() { o.get(0) } else { Some(o) });
     let offer_price = offer_obj.and_then(|o| o.get("price"));
     let props = platform_json::with_normalized_price(obj, offer_price, scale, None);
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &props);
