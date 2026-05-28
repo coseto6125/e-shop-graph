@@ -10,3 +10,6 @@ memmap2 = { workspace = true }
 xxhash-rust = { workspace = true }
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+# Cypher `=~` regex predicate (Neo4j-compatible). default-features off drops
+# the unicode tables we don't need, keeping the dependency lean.
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl", "unicode-case"] }

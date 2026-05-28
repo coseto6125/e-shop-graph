@@ -8,10 +8,13 @@ pub enum Token {
     RParen,
     LBracket,
     RBracket,
+    LBrace,
+    RBrace,
     Colon,
     Comma,
     Dot,
     Pipe,
+    Star, // * (count(*))
     // path arrows
     ArrowRight, // ->
     ArrowLeft,  // <-
@@ -23,6 +26,7 @@ pub enum Token {
     Le,
     Gt,
     Ge,
+    RegexMatch, // =~ (regex predicate, Neo4j-compatible)
     // keywords (case-insensitive) and identifiers
     Ident(String),
     Int(i64),
@@ -52,6 +56,18 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
             }
             ']' => {
                 out.push(Token::RBracket);
+                i += 1;
+            }
+            '{' => {
+                out.push(Token::LBrace);
+                i += 1;
+            }
+            '}' => {
+                out.push(Token::RBrace);
+                i += 1;
+            }
+            '*' => {
+                out.push(Token::Star);
                 i += 1;
             }
             ':' => {
@@ -86,6 +102,9 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 } else if input[i..].starts_with("<=") {
                     out.push(Token::Le);
                     i += 2;
+                } else if input[i..].starts_with("<>") {
+                    out.push(Token::Ne);
+                    i += 2;
                 } else {
                     out.push(Token::Lt);
                     i += 1;
@@ -101,8 +120,13 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 }
             }
             '=' => {
-                out.push(Token::Eq);
-                i += 1;
+                if input[i..].starts_with("=~") {
+                    out.push(Token::RegexMatch);
+                    i += 2;
+                } else {
+                    out.push(Token::Eq);
+                    i += 1;
+                }
             }
             '!' if input[i..].starts_with("!=") => {
                 out.push(Token::Ne);

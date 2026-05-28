@@ -16,7 +16,7 @@ pub fn execute(graph: &ArchivedGraph, q: &Query) -> Result<QueryResult, String> 
     let mut bindings: Vec<Binding> = Vec::new();
     let first = &q.pattern.nodes[0];
     for (idx, node) in graph.nodes.iter().enumerate() {
-        if node_matches(&node.kind, &first.kinds) {
+        if node_matches(&node.kind, &first.kinds) && inline_props_match(graph, idx as u32, first) {
             bindings.push(vec![idx as u32]);
         }
     }
@@ -28,7 +28,9 @@ pub fn execute(graph: &ArchivedGraph, q: &Query) -> Result<QueryResult, String> 
         for binding in &bindings {
             let src = binding[hop];
             for (neighbor, _) in neighbors(graph, src, rel) {
-                if node_matches(&graph.nodes[neighbor as usize].kind, &target_pat.kinds) {
+                if node_matches(&graph.nodes[neighbor as usize].kind, &target_pat.kinds)
+                    && inline_props_match(graph, neighbor, target_pat)
+                {
                     let mut extended = binding.clone();
                     extended.push(neighbor);
                     next.push(extended);
@@ -51,35 +53,29 @@ pub fn execute(graph: &ArchivedGraph, q: &Query) -> Result<QueryResult, String> 
         bindings.retain(|b| eval_bool(graph, pred, b, &var_pos));
     }
 
-    // ── LIMIT ────────────────────────────────────────────────────────────────
-    if let Some(lim) = q.limit {
-        bindings.truncate(lim as usize);
+    // ── ORDER BY ─ sort the bindings BEFORE skip/limit so top-N is correct ───
+    // Done before aggregation only handles the non-agg case; aggregate ORDER BY
+    // is applied to the projected rows further down.
+    if !q.order_by.is_empty() && !q.return_.iter().any(|ri| ri.agg.is_some()) {
+        sort_bindings(graph, &mut bindings, &q.order_by, q, &var_pos)?;
     }
 
-    // ── RETURN projection ────────────────────────────────────────────────────
-    let columns = q
-        .return_
-        .iter()
-        .map(|ri| {
-            let base = match &ri.prop {
-                Some(p) => format!("{}.{}", ri.var, p),
-                None => ri.var.clone(),
-            };
-            match ri.agg {
-                Some(a) => format!("{}({base})", agg_name(a)),
-                None => base,
-            }
-        })
-        .collect();
+    let columns = q.return_.iter().map(column_name).collect();
 
     let has_agg = q.return_.iter().any(|ri| ri.agg.is_some());
-    let rows = if has_agg {
+    let mut rows = if has_agg {
+        // Aggregation collapses bindings into groups; ORDER/SKIP/LIMIT then
+        // apply to the grouped result rows below.
         aggregate_rows(graph, q, &bindings, &var_pos)?
     } else {
         let mut rows = Vec::with_capacity(bindings.len());
         for b in &bindings {
             let mut row = Vec::with_capacity(q.return_.len());
             for ri in &q.return_ {
+                if ri.count_star {
+                    row.push(Value::Int(1));
+                    continue;
+                }
                 let pos = var_pos(&ri.var)
                     .ok_or_else(|| format!("RETURN references unknown variable {}", ri.var))?;
                 row.push(project(graph, b[pos], ri.prop.as_deref()));
@@ -89,7 +85,106 @@ pub fn execute(graph: &ArchivedGraph, q: &Query) -> Result<QueryResult, String> 
         rows
     };
 
+    // ── DISTINCT ─────────────────────────────────────────────────────────────
+    if q.distinct {
+        dedup_rows(&mut rows);
+    }
+
+    // ── SKIP then LIMIT ─ applied after ordering, so they page a sorted set ──
+    if let Some(skip) = q.skip {
+        let n = (skip as usize).min(rows.len());
+        rows.drain(..n);
+    }
+    if let Some(lim) = q.limit {
+        rows.truncate(lim as usize);
+    }
+
     Ok(QueryResult { columns, rows })
+}
+
+/// Output column label for a RETURN item: the explicit `AS alias`, else the
+/// derived `var` / `var.prop` / `agg(arg)` / `count(*)` form.
+fn column_name(ri: &ReturnItem) -> String {
+    if let Some(alias) = &ri.alias {
+        return alias.clone();
+    }
+    if ri.count_star {
+        return "count(*)".to_string();
+    }
+    let base = match &ri.prop {
+        Some(p) => format!("{}.{}", ri.var, p),
+        None => ri.var.clone(),
+    };
+    match ri.agg {
+        Some(a) => format!("{}({base})", agg_name(a)),
+        None => base,
+    }
+}
+
+/// Sort binding rows by the ORDER BY terms (stable, first term primary). An
+/// ORDER BY name may be a pattern variable OR a RETURN alias (`... AS price
+/// ORDER BY price`); aliases resolve back to the underlying var/prop.
+fn sort_bindings(
+    graph: &ArchivedGraph,
+    bindings: &mut [Binding],
+    order_by: &[OrderItem],
+    q: &Query,
+    var_pos: &impl Fn(&str) -> Option<usize>,
+) -> Result<(), String> {
+    // Resolve each term's binding position + prop once, up front.
+    let mut terms = Vec::with_capacity(order_by.len());
+    for oi in order_by {
+        // A bare ORDER BY name (no `.prop`) might be a RETURN alias.
+        let (var, prop) = if oi.prop.is_none() {
+            match q
+                .return_
+                .iter()
+                .find(|ri| ri.alias.as_deref() == Some(oi.var.as_str()))
+            {
+                Some(ri) => (ri.var.clone(), ri.prop.clone()),
+                None => (oi.var.clone(), None),
+            }
+        } else {
+            (oi.var.clone(), oi.prop.clone())
+        };
+        let pos = var_pos(&var)
+            .ok_or_else(|| format!("ORDER BY references unknown variable {}", oi.var))?;
+        terms.push((pos, prop, oi.desc));
+    }
+    bindings.sort_by(|a, b| {
+        for (pos, prop, desc) in &terms {
+            let va = project(graph, a[*pos], prop.as_deref());
+            let vb = project(graph, b[*pos], prop.as_deref());
+            let ord = order_values(&va, &vb);
+            if ord != std::cmp::Ordering::Equal {
+                return if *desc { ord.reverse() } else { ord };
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    Ok(())
+}
+
+/// Total order over values for sorting: numbers, then strings, then bools,
+/// with Null sorting last. Cross-type falls back to a stable kind ranking.
+fn order_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if let (Some(x), Some(y)) = (as_f64(a), as_f64(b)) {
+        return x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+    }
+    match (a, b) {
+        (Value::Str(x), Value::Str(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Greater, // nulls last
+        (_, Value::Null) => Ordering::Less,
+        _ => Ordering::Equal,
+    }
+}
+
+fn dedup_rows(rows: &mut Vec<Vec<Value>>) {
+    let mut seen = std::collections::HashSet::new();
+    rows.retain(|row| seen.insert(format!("{row:?}")));
 }
 
 fn agg_name(a: Agg) -> &'static str {
@@ -135,11 +230,14 @@ fn aggregate_rows(
             .or_insert_with(|| (key_vals, vec![Vec::new(); agg_items.len()]));
         // Collect each aggregate's numeric input for this row.
         for (ai, ri) in agg_items.iter().enumerate() {
+            // count(*) / count(p) just tally rows — no variable to resolve.
+            if ri.agg == Some(Agg::Count) {
+                entry.1[ai].push(1.0);
+                continue;
+            }
             let pos = var_pos(&ri.var)
                 .ok_or_else(|| format!("RETURN references unknown variable {}", ri.var))?;
-            if ri.agg == Some(Agg::Count) {
-                entry.1[ai].push(1.0); // count tallies rows; value irrelevant
-            } else if let Some(n) = value_as_f64(&project(graph, b[pos], ri.prop.as_deref())) {
+            if let Some(n) = value_as_f64(&project(graph, b[pos], ri.prop.as_deref())) {
                 entry.1[ai].push(n);
             }
         }
@@ -270,8 +368,40 @@ fn eval_bool(
             let rv = eval_scalar(graph, r, binding, var_pos);
             compare(&lv, &rv, *op)
         }
-        // A bare property / literal is truthy when non-null/non-empty.
-        other => !matches!(eval_scalar(graph, other, binding, var_pos), Value::Null),
+        Expr::Not(inner) => !eval_bool(graph, inner, binding, var_pos),
+        Expr::IsNull(inner, want_null) => {
+            let is_null = matches!(eval_scalar(graph, inner, binding, var_pos), Value::Null);
+            is_null == *want_null
+        }
+        Expr::StrMatch(kind, inner, needle) => match eval_scalar(graph, inner, binding, var_pos) {
+            // Case-insensitive: LLMs routinely emit lowercase needles. Lowercase
+            // both sides (Unicode-aware) before matching.
+            Value::Str(s) => {
+                let hay = s.to_lowercase();
+                let pat = needle.to_lowercase();
+                match kind {
+                    StrMatch::StartsWith => hay.starts_with(&pat),
+                    StrMatch::Contains => hay.contains(&pat),
+                    StrMatch::EndsWith => hay.ends_with(&pat),
+                }
+            }
+            _ => false,
+        },
+        Expr::In(inner, list) => {
+            let v = eval_scalar(graph, inner, binding, var_pos);
+            list.iter()
+                .any(|lit| compare(&v, &literal_value(lit), Op::Eq))
+        }
+        Expr::Regex(inner, re) => match eval_scalar(graph, inner, binding, var_pos) {
+            Value::Str(s) => re.is_match(&s),
+            _ => false,
+        },
+        // A bare property / literal is truthy when present and not false/null.
+        other => match eval_scalar(graph, other, binding, var_pos) {
+            Value::Null => false,
+            Value::Bool(b) => b,
+            _ => true,
+        },
     }
 }
 
@@ -285,12 +415,37 @@ fn eval_scalar(
         Expr::Lit(Literal::Int(i)) => Value::Int(*i),
         Expr::Lit(Literal::Float(f)) => Value::Float(*f),
         Expr::Lit(Literal::Str(s)) => Value::Str(s.clone()),
+        Expr::Lit(Literal::Bool(b)) => Value::Bool(*b),
         Expr::Prop(var, prop) => match var_pos(var) {
             Some(pos) => read_prop(graph, binding[pos], prop),
             None => Value::Null,
         },
-        Expr::BinOp(..) => Value::Null, // nested boolean in scalar position: unsupported
+        // Boolean-valued expressions in a scalar slot are not meaningful values.
+        Expr::BinOp(..)
+        | Expr::Not(_)
+        | Expr::IsNull(..)
+        | Expr::StrMatch(..)
+        | Expr::In(..)
+        | Expr::Regex(..) => Value::Null,
     }
+}
+
+fn literal_value(lit: &Literal) -> Value {
+    match lit {
+        Literal::Int(i) => Value::Int(*i),
+        Literal::Float(f) => Value::Float(*f),
+        Literal::Str(s) => Value::Str(s.clone()),
+        Literal::Bool(b) => Value::Bool(*b),
+    }
+}
+
+/// True if every inline `{prop: literal}` constraint on `pat` equals the node's
+/// corresponding property. Empty constraint list = always true.
+fn inline_props_match(graph: &ArchivedGraph, node_idx: u32, pat: &NodePat) -> bool {
+    pat.props.iter().all(|(key, lit)| {
+        let actual = read_prop(graph, node_idx, key);
+        compare(&actual, &literal_value(lit), Op::Eq)
+    })
 }
 
 /// Read `prop` off a node: `name`/`kind` are intrinsic; everything else comes
@@ -336,6 +491,7 @@ fn compare(l: &Value, r: &Value, op: Op) -> bool {
         (Some(a), Some(b)) => a.partial_cmp(&b),
         _ => match (l, r) {
             (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+            (Value::Bool(a), Value::Bool(b)) => Some(a.cmp(b)),
             _ => None,
         },
     };
