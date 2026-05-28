@@ -14,9 +14,34 @@
 //!    ISO 4217 code, or a symbol that maps to exactly one currency). Ambiguous
 //!    symbols ($, ¥, 元) are left undetermined for an upstream caller to set;
 //!    the number itself carries no currency, so we don't guess.
+//!
+//! The output is a single `Decimal`-backed `price` field — what the source
+//! displays to a human, with currency-aware precision:
+//!   * ISO 4217 zero-decimal currencies (JPY/KRW/TWD/VND/IDR): integer string
+//!     (`"690"`). A JSON `690.00` and a JSON `690` both surface as `"690"`.
+//!   * Two-decimal currencies (USD/EUR/GBP/…): up to two fractional digits,
+//!     trailing-`.00` stripped (`"4.20"`, `"4"` — not `"4.0000"`).
+//!   * Detected JSON-cents values (e.g. variants ship `4200` while the page
+//!     renders `42.00 USD`): divided back into whole units before formatting.
+//!
+//! `Decimal` throughout — `f64` would have rounded `690.00 * 100` to
+//! `68999.999…` and that has actually bitten this pipeline before.
 
+use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use serde_json::Value;
 use std::collections::HashSet;
+
+/// ISO 4217 currencies with zero minor units. The same Decimal value is
+/// already in whole units for these — no `/100` rescale and no fractional
+/// digits when formatting. Sourced from
+/// <https://en.wikipedia.org/wiki/ISO_4217#Active_codes_(List_One)>;
+/// limited to codes esg already recognises (see `iso4217`).
+const ZERO_DECIMAL_CURRENCIES: &[&str] = &["JPY", "KRW", "TWD", "VND", "IDR"];
+
+fn is_zero_decimal(currency: &str) -> bool {
+    ZERO_DECIMAL_CURRENCIES.contains(&currency)
+}
 
 /// Normalized price plus a confidence score, summed from independent signals
 /// (no single signal is trusted alone — the currency-symbol table can never be
@@ -25,11 +50,15 @@ use std::collections::HashSet;
 ///       symbol-table-INDEPENDENT, the strongest signal.
 ///   +2  a page anchor (currency-adjacent number) matches the value.
 ///   +1  the matched value recurs across the page (multiple occurrences).
-/// `confident` is `score >= 2`. `cents`/`currency` may still be filled at lower
+/// `confident` is `score >= 2`. `price`/`currency` may still be filled at lower
 /// scores (best-effort, flagged) so downstream can choose to trust or skip.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// `price` is the human-readable amount as a string (zero-cent trailing strip,
+/// see module docs). The verdict ships ONE price representation — no parallel
+/// `cents` integer to drift out of sync with `display`, and no `f64` rounding.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PriceVerdict {
-    pub cents: i64,
+    pub price: String,
     pub currency: &'static str,
     pub score: i32,
 }
@@ -90,75 +119,137 @@ impl PriceScale {
         }
     }
 
-    /// Score one JSON price into cents. `peer_whole` is an optional companion
-    /// value KNOWN to be in whole units (e.g. a sibling `price_min` string like
-    /// "790.0", or a product-level price) used for symbol-independent cross-
-    /// field corroboration. Signals accumulate into `PriceVerdict::score`.
-    pub fn verdict(&self, field: Option<&Value>, peer_whole: Option<f64>) -> Option<PriceVerdict> {
-        let n = number_of(field?)?;
+    /// Score one JSON price into a normalized whole-unit `Decimal`.
+    /// `peer_whole` is an optional companion value KNOWN to be in whole units
+    /// (e.g. a sibling `price_min` string like "790.0", or a product-level
+    /// price) used for symbol-independent cross-field corroboration. Signals
+    /// accumulate into `PriceVerdict::score`.
+    ///
+    /// Returns `None` when the field has no extractable magnitude. Returns a
+    /// verdict whose `price` is the whole-unit string formatted per the
+    /// currency's minor-unit convention.
+    pub fn verdict(&self, field: Option<&Value>, peer_whole: Option<Decimal>) -> Option<PriceVerdict> {
+        let n = decimal_of(field?)?;
+
+        // Detect whether the JSON number was already in minor units (cents);
+        // if so, divide back into whole units before formatting. `whole`
+        // is the post-detection amount in whole currency units (e.g. 4.20
+        // USD or 690 TWD), `score` the confidence in that decision.
+        let mut whole: Option<Decimal> = None;
         let mut score = 0;
 
         // Signal 1 (+3): JSON cross-field. If a peer is known to be whole units
         // and this value is that peer ×100 (or ×1), the unit is pinned WITHOUT
         // any page symbol. Strongest, symbol-table-independent.
-        let mut cents = None;
-        if let Some(peer) = peer_whole.filter(|&p| p > 0.0) {
-            let r = n / peer;
-            if (r - 100.0).abs() < 0.5 {
-                cents = Some(n.round() as i64); // this value is in cents
+        if let Some(peer) = peer_whole.filter(|p| p.is_sign_positive() && !p.is_zero()) {
+            // Use a Decimal-safe ratio: subtract instead of divide so f64
+            // rounding never reaches us. r ≈ n / peer.
+            let hundred_peer = peer * Decimal::ONE_HUNDRED;
+            let one_peer = peer;
+            if (n - hundred_peer).abs() < (peer / Decimal::TWO) {
+                whole = Some(n / Decimal::ONE_HUNDRED); // this value is in cents
                 score += 3;
-            } else if (r - 1.0).abs() < 0.01 {
-                cents = Some((n * 100.0).round() as i64); // whole units
+            } else if (n - one_peer).abs() < (peer / Decimal::from(100)) {
+                whole = Some(n); // already whole units
                 score += 3;
             }
         }
 
         // Signal 2 (+2): page anchor (currency-adjacent number) matches.
-        if cents.is_none() && self.has_anchors {
-            let rounded = n.round() as u64;
-            if self.unit_set.contains(&rounded) {
-                cents = Some((n * 100.0).round() as i64);
-                score += 2;
-                if self.recurring.contains(&rounded) {
-                    score += 1; // Signal 3: recurs across the page
-                }
-            } else if n >= 100.0
-                && (n / 100.0).fract() == 0.0
-                && self.unit_set.contains(&((n / 100.0).round() as u64))
-            {
-                cents = Some(n.round() as i64);
-                score += 2;
-                if self.recurring.contains(&((n / 100.0).round() as u64)) {
-                    score += 1;
+        if whole.is_none() && self.has_anchors {
+            let rounded_u64 = decimal_to_u64_round(&n);
+            if let Some(r) = rounded_u64 {
+                if self.unit_set.contains(&r) {
+                    whole = Some(n);
+                    score += 2;
+                    if self.recurring.contains(&r) {
+                        score += 1; // Signal 3: recurs across the page
+                    }
+                } else if n >= Decimal::ONE_HUNDRED {
+                    // The JSON number could be cents (4200) while the visible
+                    // whole price is /100 of it (42). Check the divided form
+                    // against the anchor set.
+                    let divided = n / Decimal::ONE_HUNDRED;
+                    if divided.fract().is_zero() {
+                        if let Some(dr) = decimal_to_u64_round(&divided) {
+                            if self.unit_set.contains(&dr) {
+                                whole = Some(divided);
+                                score += 2;
+                                if self.recurring.contains(&dr) {
+                                    score += 1;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
 
         // Fallback: no corroboration → whole-units assumption, score stays low.
-        let cents = cents.unwrap_or_else(|| (n * 100.0).round() as i64);
+        let whole = whole.unwrap_or(n);
         Some(PriceVerdict {
-            cents,
+            price: format_price(whole, self.currency),
             currency: self.currency,
             score,
         })
     }
 }
 
-/// Numeric value of a JSON price field. Strips any non-numeric characters
-/// (currency symbols, separators) WITHOUT interpreting them — we only want the
-/// magnitude here; the unit is decided later against the page.
-fn number_of(v: &Value) -> Option<f64> {
+/// Render a whole-unit `Decimal` per the currency's minor-unit convention:
+///   * Zero-decimal currencies (JPY/KRW/TWD/…): integer string, no `.`.
+///   * Two-decimal currencies (default for ambiguous / minor-unit codes):
+///     up to two fractional digits, trailing zeros stripped after the
+///     decimal point. `4.20` → `"4.20"`, `4.00` → `"4"`, `4.5` → `"4.50"`.
+///
+/// The output is what a UI displays as-is. Consumers that need arithmetic
+/// parse it back via `Decimal::from_str_exact`.
+fn format_price(amount: Decimal, currency: &str) -> String {
+    if is_zero_decimal(currency) {
+        // Round to integer (any fractional component on a zero-decimal
+        // currency is presentational noise, e.g. JSON `690.00`).
+        return amount.round_dp(0).trunc().to_string();
+    }
+    // Two-decimal default. Round to 2 dp, then drop a pure-zero fractional
+    // part so `4.00` shows as `4`, but keep `4.20` as `4.20` (the user-
+    // visible precision the source intended).
+    let two = amount.round_dp(2);
+    if two.fract().is_zero() {
+        two.trunc().to_string()
+    } else {
+        // Format with exactly 2 fractional digits so `4.5` → `"4.50"`.
+        format!("{:.2}", two)
+    }
+}
+
+/// Decimal value of a JSON price field — Decimal-safe parse (never via f64).
+/// Strips non-numeric characters (currency symbols, separators) WITHOUT
+/// interpreting them — magnitude only; unit is decided later against the page.
+fn decimal_of(v: &Value) -> Option<Decimal> {
     match v {
-        Value::Number(n) => n.as_f64(),
+        Value::Number(n) => {
+            // Prefer the JSON token's textual form so `690.00` round-trips
+            // exactly. `Number::to_string()` reproduces the parsed digits.
+            Decimal::from_str_exact(&n.to_string()).ok()
+        }
         Value::String(s) => {
             let cleaned: String = s
                 .chars()
                 .filter(|c| c.is_ascii_digit() || *c == '.')
                 .collect();
-            cleaned.parse().ok()
+            Decimal::from_str_exact(&cleaned).ok()
         }
         _ => None,
     }
+}
+
+/// Rounded u64 image of a Decimal for HashSet membership tests. Returns None
+/// when the value is negative or overflows u64 — both treated as "no anchor".
+fn decimal_to_u64_round(d: &Decimal) -> Option<u64> {
+    let rounded = d.round();
+    if rounded.is_sign_negative() {
+        return None;
+    }
+    rounded.to_u64()
 }
 
 /// Extract rendered text: drop `<script>`/`<style>` bodies entirely and strip
@@ -403,30 +494,38 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn dec(s: &str) -> Decimal {
+        Decimal::from_str_exact(s).unwrap()
+    }
+
     /// Anchor = number adjacent to a currency symbol, decimals or not. Mirrors
     /// doni (product.price=790 whole, variant.price=79000 cents coexisting).
+    /// `currency=""` here (ambiguous `NT$`) means we format as a 2-dp currency;
+    /// 790 → "790" (trailing .00 stripped).
     #[test]
     fn unit_detect_currency_adjacent_decimal() {
         let scale = PriceScale::from_html("<span>NT$ 790.00</span> ... 590.00 ...");
         let v = scale.verdict(Some(&json!(790)), None).unwrap();
-        assert_eq!((v.cents, v.confident()), (79000, true));
+        assert_eq!((v.price.as_str(), v.confident()), ("790", true));
         let v2 = scale.verdict(Some(&json!(79000)), None).unwrap();
-        assert_eq!((v2.cents, v2.confident()), (79000, true));
+        // 79000 looks like cents against the visible 790 anchor → 790 whole.
+        assert_eq!((v2.price.as_str(), v2.confident()), ("790", true));
     }
 
-    /// Integer-price locales (TW/JP/KR) render NO decimals. Symbol before
-    /// (`$790`, `₩79000`) or after (`790元`) must still anchor.
+    /// Integer-price locales render no decimals. The display string drops the
+    /// trailing `.00`; KRW is zero-decimal so the value never multiplies.
     #[test]
     fn unit_detect_integer_prices_prefix_and_suffix() {
         let pre = PriceScale::from_html("價格 $790 限時");
-        assert_eq!(pre.verdict(Some(&json!(790)), None).unwrap().cents, 79000);
+        assert_eq!(pre.verdict(Some(&json!(790)), None).unwrap().price, "790");
 
         let suf = PriceScale::from_html("售價 790元 起");
-        assert_eq!(suf.verdict(Some(&json!(790)), None).unwrap().cents, 79000);
+        assert_eq!(suf.verdict(Some(&json!(790)), None).unwrap().price, "790");
 
         let krw = PriceScale::from_html("₩79000 세일");
         let v = krw.verdict(Some(&json!(79000)), None).unwrap();
-        assert_eq!((v.cents, v.currency), (7900000, "KRW"));
+        // KRW is zero-decimal → display is the whole value, integer-formatted.
+        assert_eq!((v.price.as_str(), v.currency), ("79000", "KRW"));
     }
 
     /// Cross-field corroboration needs NO page symbol: a whole-unit peer (790)
@@ -436,13 +535,39 @@ mod tests {
     fn unit_detect_json_cross_field_no_symbol() {
         let scale = PriceScale::from_html("<p>no currency symbols anywhere</p>");
         assert!(!scale.has_anchors);
-        // variant 79000 against whole-unit peer 790 → cents, high score
-        let v = scale.verdict(Some(&json!(79000)), Some(790.0)).unwrap();
-        assert_eq!(v.cents, 79000);
+        // variant 79000 against whole-unit peer 790 → divided back to 790,
+        // confidently. Currency is empty → 2-dp default → "790".
+        let v = scale.verdict(Some(&json!(79000)), Some(dec("790"))).unwrap();
+        assert_eq!(v.price, "790");
         assert!(v.confident()); // score 3 from cross-field alone
-                                // whole-unit value against same peer → ×100
-        let w = scale.verdict(Some(&json!(790)), Some(790.0)).unwrap();
-        assert_eq!((w.cents, w.confident()), (79000, true));
+        // whole-unit value against same peer → unchanged.
+        let w = scale.verdict(Some(&json!(790)), Some(dec("790"))).unwrap();
+        assert_eq!((w.price.as_str(), w.confident()), ("790", true));
+    }
+
+    /// Regression for the 690.00 → 68999.999… f64 round-trip that bit doni.
+    /// `690.00` typed as a JSON number must surface as the string `"690"`,
+    /// not a float-cast cents integer. Currency is set by an explicit ISO
+    /// code field (the only path `detect_currency` trusts — bare `NT$` is
+    /// ambiguous and intentionally leaves currency empty).
+    #[test]
+    fn zero_decimal_strips_trailing_zeros() {
+        let scale = PriceScale::from_html(r#"NT$ 690 {"priceCurrency":"TWD"}"#);
+        let v = scale.verdict(Some(&json!(690.00)), None).unwrap();
+        assert_eq!(v.currency, "TWD"); // TWD is zero-decimal
+        assert_eq!(v.price, "690");
+    }
+
+    /// Two-decimal currency keeps the cents when non-zero: USD 4.20 prints
+    /// as "4.20", not "4.2". Explicit `"currency":"USD"` JSON field is the
+    /// canonical signal (bare "USD" in prose isn't enough — see
+    /// `detect_currency`).
+    #[test]
+    fn two_decimal_keeps_meaningful_cents() {
+        let scale = PriceScale::from_html(r#"price 4.20 {"currency":"USD"} shown"#);
+        let v = scale.verdict(Some(&json!(4.20)), None).unwrap();
+        assert_eq!(v.currency, "USD");
+        assert_eq!(v.price, "4.20");
     }
 
     /// "Too common" numbers (years, tiny counts) must not become anchors.
@@ -490,6 +615,7 @@ mod tests {
     fn no_anchor_low_confidence() {
         let scale = PriceScale::from_html("<p>no prices here</p>");
         let v = scale.verdict(Some(&json!(50)), None).unwrap();
-        assert_eq!((v.cents, v.confident()), (5000, false));
+        // Currency empty → 2-dp default → "50" (50.00 strips to "50").
+        assert_eq!((v.price.as_str(), v.confident()), ("50", false));
     }
 }

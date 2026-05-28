@@ -54,13 +54,14 @@ fn name_reads_from_h1_element_text() {
 #[test]
 fn price_reads_from_span_element_text() {
     // Same lesson on price: real stores ship `<span itemprop="price">890</span>`,
-    // not a `content=` meta. PriceScale's TWD inference from "NT$890" should
-    // commit on the page anchor regardless of carrier.
-    let rows = cypher_rows(DONI_HTML, "MATCH (p:Product) RETURN p.price_cents");
+    // not a `content=` meta. The display string honours the source value
+    // verbatim (zero-decimal stripping for TWD) — `"890"`, never `"890.00"`
+    // or a multiplied-cents integer.
+    let rows = cypher_rows(DONI_HTML, "MATCH (p:Product) RETURN p.price");
     assert_eq!(rows.len(), 1);
     assert!(
-        !matches!(rows[0][0], Value::Null),
-        "Product.price_cents should be set, got {:?}",
+        matches!(&rows[0][0], Value::Str(s) if s == "890"),
+        "Product.price should be \"890\" (TWD zero-decimal), got {:?}",
         rows[0][0]
     );
 }

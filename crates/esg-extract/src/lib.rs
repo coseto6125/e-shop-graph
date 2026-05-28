@@ -201,9 +201,10 @@ fn tracing_warn(path: &std::path::Path, e: &std::io::Error) {
 ///
 /// Threading `scale` here keeps JSON-LD on the same normalization path as
 /// platform_json / dom_attr / next_data / microdata — Product nodes from
-/// any source carry the same `price_cents` / `currency` / `price_confident`
-/// schema, so cross-source Cypher (`WHERE p.price_cents < 5000`) hits
-/// every product regardless of how the page surfaced it.
+/// any source carry the same `price` (string, whole units) / `currency` /
+/// `price_confident` schema, so cross-source Cypher
+/// (`WHERE p.price = "4200"` or string-prefix matches) hits every product
+/// regardless of how the page surfaced it.
 fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
     let ty = obj.get("@type").and_then(Value::as_str).unwrap_or("");
     if ty != "Product" {

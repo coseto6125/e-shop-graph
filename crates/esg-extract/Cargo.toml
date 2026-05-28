@@ -12,6 +12,7 @@ serde_json = { workspace = true }
 rayon = { workspace = true }
 anyhow = { workspace = true }
 memmap2 = { workspace = true }
+rust_decimal = { workspace = true }
 
 # Used only by integration tests for cross-source schema parity: build the
 # extracted graph through the same rkyv serialize/access path the production

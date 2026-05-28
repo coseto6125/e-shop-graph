@@ -12,6 +12,8 @@
 
 use crate::price::PriceScale;
 use esg_core::{GraphBuilder, NodeKind, RelType};
+use rust_decimal::prelude::*;
+use rust_decimal::Decimal;
 use serde_json::Value;
 
 /// Candidate keys for the inline product array, in priority order. `products`
@@ -104,7 +106,7 @@ fn ingest_variants(
     id: &str,
     product_idx: u32,
     scale: &PriceScale,
-    peer_whole: Option<f64>,
+    peer_whole: Option<Decimal>,
 ) {
     // Model A/B: an array under `variants` or `variations`.
     let array = p
@@ -137,23 +139,32 @@ fn ingest_variants(
 
 /// A value KNOWN to be in whole units, for cross-field price corroboration.
 /// A decimal-string `price_min` is the strongest (the dot proves whole units);
-/// `price_range.min.price` is the cyberbiz fallback.
-fn whole_unit_peer(p: &Value) -> Option<f64> {
+/// `price_range.min.price` is the cyberbiz fallback. Returned as `Decimal`
+/// so the downstream comparison stays exact — `f64` here once turned 690.00
+/// into 689.9999… and the corroboration silently mis-fired.
+fn whole_unit_peer(p: &Value) -> Option<Decimal> {
     if let Some(s) = p.get("price_min").and_then(Value::as_str) {
-        if let Ok(v) = s.parse::<f64>() {
+        if let Ok(v) = Decimal::from_str_exact(s) {
             return Some(v);
         }
     }
     p.get("price_range")
         .and_then(|r| r.get("min"))
         .and_then(|m| m.get("price"))
-        .and_then(Value::as_f64)
+        .and_then(|v| match v {
+            Value::Number(n) => Decimal::from_str_exact(&n.to_string()).ok(),
+            Value::String(s) => Decimal::from_str_exact(s).ok(),
+            _ => None,
+        })
 }
 
-/// Serialize a node's source object with normalized `price_cents`, `currency`,
-/// and `price_confident` injected. Unit is scored from independent signals
-/// (JSON cross-field via `peer_whole`, page anchors, recurrence) per
-/// `PriceVerdict`; the original `price` is kept for provenance.
+/// Serialize a node's source object with normalized `price`, `currency`,
+/// `price_confident`, and `price_score` injected. Unit is scored from
+/// independent signals (JSON cross-field via `peer_whole`, page anchors,
+/// recurrence) per `PriceVerdict`. The original JSON `price` key is
+/// overwritten with the rendered whole-unit string — what the source meant
+/// to display — so a downstream `RETURN p.price` works without per-currency
+/// math.
 ///
 /// Crate-visible so JSON-LD ingest (`lib::ingest_object`) shares the same
 /// normalization path as every other source — one price contract across
@@ -162,14 +173,19 @@ pub(crate) fn with_normalized_price(
     obj: &Value,
     price_field: Option<&Value>,
     scale: &PriceScale,
-    peer_whole: Option<f64>,
+    peer_whole: Option<Decimal>,
 ) -> String {
     let mut map = obj.as_object().cloned().unwrap_or_default();
     if let Some(v) = scale.verdict(price_field, peer_whole) {
-        map.insert("price_cents".into(), Value::Number(v.cents.into()));
-        map.insert("currency".into(), Value::String(v.currency.to_string()));
-        map.insert("price_confident".into(), Value::Bool(v.confident()));
-        map.insert("price_score".into(), Value::Number(v.score.into()));
+        // Pull primitive fields off before the String move so the verdict is
+        // not partially-moved when we read `.score` / `.confident()`.
+        let confident = v.confident();
+        let score = v.score;
+        let currency = v.currency.to_string();
+        map.insert("price".into(), Value::String(v.price));
+        map.insert("currency".into(), Value::String(currency));
+        map.insert("price_confident".into(), Value::Bool(confident));
+        map.insert("price_score".into(), Value::Number(score.into()));
     }
     Value::Object(map).to_string()
 }

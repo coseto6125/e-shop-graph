@@ -64,12 +64,11 @@ pub fn ingest_ga_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
 fn with_price(obj: &Value, scale: &PriceScale) -> String {
     let mut map = obj.as_object().cloned().unwrap_or_default();
     if let Some(verdict) = scale.verdict(obj.get("price"), None) {
-        map.insert("price_cents".into(), Value::Number(verdict.cents.into()));
-        map.insert(
-            "currency".into(),
-            Value::String(verdict.currency.to_string()),
-        );
-        map.insert("price_confident".into(), Value::Bool(verdict.confident()));
+        let confident = verdict.confident();
+        let currency = verdict.currency.to_string();
+        map.insert("price".into(), Value::String(verdict.price));
+        map.insert("currency".into(), Value::String(currency));
+        map.insert("price_confident".into(), Value::Bool(confident));
     }
     Value::Object(map).to_string()
 }

@@ -112,12 +112,15 @@ pub fn ingest_microdata(
             .as_ref()
             .map(|s| serde_json::Value::String(s.clone()));
         if let Some(v) = scale.verdict(price_value.as_ref(), None) {
-            props.insert("price_cents".into(), v.cents.into());
-            if !v.currency.is_empty() {
-                props.insert("currency".into(), v.currency.into());
+            let confident = v.confident();
+            let score = v.score;
+            let currency = v.currency;
+            props.insert("price".into(), serde_json::Value::String(v.price));
+            if !currency.is_empty() {
+                props.insert("currency".into(), currency.into());
             }
-            props.insert("price_confident".into(), v.confident().into());
-            props.insert("price_score".into(), v.score.into());
+            props.insert("price_confident".into(), confident.into());
+            props.insert("price_score".into(), score.into());
         }
         // itemprop priceCurrency is an explicit signal; prefer it when present.
         if let Some(ref cur) = p.currency {

@@ -458,18 +458,34 @@ fn read_prop(graph: &ArchivedGraph, node_idx: u32, prop: &str) -> Value {
         _ => {
             let props_json = arch_str(graph, &node.props);
             match serde_json::from_str::<serde_json::Value>(&props_json) {
-                Ok(v) => json_to_value(v.get(prop)),
+                Ok(v) => json_to_value(prop, v.get(prop)),
                 Err(_) => Value::Null,
             }
         }
     }
 }
 
-fn json_to_value(v: Option<&serde_json::Value>) -> Value {
+/// Property names whose JSON-string value MUST surface as a Cypher `Str`,
+/// never coerced into Int/Float by the numeric-looking-string rule. `price`
+/// is the canonical case: the extractor renders it as a whole-unit display
+/// string (`"690"`, `"4.20"`) that consumers paste into chat; coercing
+/// `"690"` to `Int(690)` would silently drop the formatting work and let
+/// downstream UIs print a raw integer where the operator expected the
+/// currency-aware string the extractor produced.
+const STRING_ONLY_PROPS: &[&str] = &["price"];
+
+fn json_to_value(prop: &str, v: Option<&serde_json::Value>) -> Value {
     match v {
         Some(serde_json::Value::String(s)) => {
-            // Prices arrive as JSON strings ("299.99"); coerce numerics so
-            // `p.price < 200` works without quoting in the query.
+            if STRING_ONLY_PROPS.contains(&prop) {
+                // Preserve the display string verbatim. Filtering by numeric
+                // magnitude on these properties is a category error; consumers
+                // who need it parse the string explicitly or query a
+                // sibling numeric field (e.g. `price_score`).
+                return Value::Str(s.clone());
+            }
+            // Other numeric-looking strings ("299.99" sitting on some legacy
+            // field) coerce so `p.foo < 200` works without quoting.
             if let Ok(i) = s.parse::<i64>() {
                 Value::Int(i)
             } else if let Ok(f) = s.parse::<f64>() {
