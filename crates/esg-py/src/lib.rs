@@ -18,10 +18,14 @@ fn err(e: impl std::fmt::Display) -> PyErr {
 /// (rkyv `graph.bin`). Returns the byte size written. Suited to small batches
 /// where holding all HTML in memory is fine.
 #[pyfunction]
-fn build_graph(pages: Vec<String>, out_path: &str) -> PyResult<usize> {
-    let builder = esg_extract::build_from_pages(pages).map_err(err)?;
-    let graph = builder.build();
-    write_graph(&graph, out_path)
+fn build_graph(py: Python<'_>, pages: Vec<String>, out_path: &str) -> PyResult<usize> {
+    let out = PathBuf::from(out_path);
+    // CPU-bound Rust (parse + rayon build + rkyv write) touches no Python
+    // objects — release the GIL so the caller's other threads keep running.
+    py.allow_threads(|| {
+        let builder = esg_extract::build_from_pages(pages).map_err(err)?;
+        write_graph(&builder.build(), &out)
+    })
 }
 
 /// Memory-bounded build: scan `html_dir` for `*.html`/`*.htm`, mmap each file
@@ -29,19 +33,26 @@ fn build_graph(pages: Vec<String>, out_path: &str) -> PyResult<usize> {
 /// is ~one page + the growing graph — independent of page count. This is the
 /// enoract handoff path. Returns (page_count, bytes_written).
 #[pyfunction]
-fn build_graph_from_dir(html_dir: &str, out_path: &str) -> PyResult<(usize, usize)> {
+fn build_graph_from_dir(
+    py: Python<'_>,
+    html_dir: &str,
+    out_path: &str,
+) -> PyResult<(usize, usize)> {
     let dir = PathBuf::from(html_dir);
-    let mut paths = Vec::new();
-    for entry in std::fs::read_dir(&dir).map_err(err)? {
-        let path = entry.map_err(err)?.path();
-        if path.extension().is_some_and(|e| e == "html" || e == "htm") {
-            paths.push(path);
+    let out = PathBuf::from(out_path);
+    // Directory scan + mmap-streamed build + write are all pure Rust/IO.
+    py.allow_threads(|| {
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(&dir).map_err(err)? {
+            let path = entry.map_err(err)?.path();
+            if path.extension().is_some_and(|e| e == "html" || e == "htm") {
+                paths.push(path);
+            }
         }
-    }
-    let builder = esg_extract::build_from_files(&paths).map_err(err)?;
-    let graph = builder.build();
-    let bytes = write_graph(&graph, out_path)?;
-    Ok((paths.len(), bytes))
+        let builder = esg_extract::build_from_files(&paths).map_err(err)?;
+        let bytes = write_graph(&builder.build(), &out)?;
+        Ok((paths.len(), bytes))
+    })
 }
 
 /// Run a read-only Cypher query against a saved `graph.bin` (mmap'd zero-copy).
@@ -49,28 +60,33 @@ fn build_graph_from_dir(html_dir: &str, out_path: &str) -> PyResult<(usize, usiz
 /// value becomes a nested dict `{"idx", "kind", "name"}`.
 #[pyfunction]
 fn query(py: Python<'_>, graph_path: &str, cypher_query: &str) -> PyResult<Py<PyList>> {
-    let loaded = LoadedGraph::open(&PathBuf::from(graph_path)).map_err(err)?;
-    let result = cypher::query(loaded.graph(), cypher_query).map_err(err)?;
+    let path = PathBuf::from(graph_path);
+    // mmap open + parse + execute are pure Rust over the archived graph —
+    // release the GIL for the latency-critical query path. Only the result
+    // projection below touches Python objects.
+    let result = py.allow_threads(|| {
+        let loaded = LoadedGraph::open(&path).map_err(err)?;
+        cypher::query(loaded.graph(), cypher_query).map_err(err)
+    })?;
 
-    let rows = PyList::empty(py);
+    let mut dicts = Vec::with_capacity(result.rows.len());
     for row in &result.rows {
         let dict = PyDict::new(py);
         for (col, val) in result.columns.iter().zip(row) {
             dict.set_item(col, value_to_py(py, val)?)?;
         }
-        rows.append(dict)?;
+        dicts.push(dict);
     }
-    Ok(rows.into())
+    Ok(PyList::new(py, dicts)?.unbind())
 }
 
-fn write_graph(graph: &esg_core::Graph, out_path: &str) -> PyResult<usize> {
-    let path = PathBuf::from(out_path);
+fn write_graph(graph: &esg_core::Graph, path: &std::path::Path) -> PyResult<usize> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(err)?;
         }
     }
-    save(graph, &path).map_err(err)
+    save(graph, path).map_err(err)
 }
 
 fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
