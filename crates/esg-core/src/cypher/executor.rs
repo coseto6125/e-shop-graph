@@ -370,6 +370,7 @@ fn archived_rel_eq(a: &ArchivedRelType, b: RelType) -> bool {
         RelType::Category => ArchivedRelType::Category,
         RelType::Author => ArchivedRelType::Author,
         RelType::HasVariant => ArchivedRelType::HasVariant,
+        RelType::BroaderCategory => ArchivedRelType::BroaderCategory,
     }
 }
 

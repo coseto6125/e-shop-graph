@@ -71,7 +71,12 @@ pub struct Graph {
 }
 
 pub const MAGIC: [u8; 4] = *b"ESG1";
-pub const VERSION: u32 = 2;
+/// Bumped 2→3 for the schema expansion: Review/Person/Organization/Category
+/// nodes and the new BroaderCategory edge are now emitted. rkyv discriminants
+/// stayed stable (new variants appended at the end), so the bump is a semantic
+/// signal for consumers — a v3 graph with no Review nodes means the page had
+/// none, vs a v2 graph where the extractor simply never produced them.
+pub const VERSION: u32 = 3;
 
 impl Graph {
     /// Resolve a `Str` slice against the pool. Panics on out-of-bounds — a

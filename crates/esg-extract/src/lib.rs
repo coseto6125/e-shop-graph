@@ -73,6 +73,26 @@ fn collect_objects(val: Value, out: &mut Vec<Value>) {
                 collect_objects(graph, out);
             }
         }
+        Value::Object(ref map) if map.contains_key("itemListElement") => {
+            // ItemList (collection / category page): each itemListElement is a
+            // ListItem wrapping the real entity under `item` (or is the entity
+            // itself). Recurse so every listed Product becomes its own object,
+            // instead of dropping the whole page as one non-Product node.
+            let mut obj = val;
+            if let Some(list) = obj.as_object_mut().and_then(|m| m.remove("itemListElement")) {
+                match list {
+                    Value::Array(items) => items.into_iter().for_each(|it| {
+                        let inner = it
+                            .as_object()
+                            .and_then(|m| m.get("item"))
+                            .cloned()
+                            .unwrap_or(it);
+                        collect_objects(inner, out);
+                    }),
+                    other => collect_objects(other, out),
+                }
+            }
+        }
         Value::Object(_) => out.push(val),
         _ => {}
     }
@@ -206,8 +226,15 @@ fn tracing_warn(path: &std::path::Path, e: &std::io::Error) {
 /// (`WHERE p.price = "4200"` or string-prefix matches) hits every product
 /// regardless of how the page surfaced it.
 fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
-    let ty = obj.get("@type").and_then(Value::as_str).unwrap_or("");
-    if ty != "Product" {
+    // `@type` is usually a string but schema.org permits an array of types
+    // (e.g. `["Product","IndividualProduct"]`); accept either as long as
+    // "Product" is present.
+    let is_product = match obj.get("@type") {
+        Some(Value::String(s)) => s == "Product",
+        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("Product")),
+        _ => false,
+    };
+    if !is_product {
         return;
     }
     let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
@@ -227,15 +254,66 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
 
     // Pull the offer's price field BEFORE the upsert so the Product node
     // ships with normalized price props. JSON-LD `offers` may be an Offer
-    // object or a list of Offers; we take the first (typical retailer
-    // layout — one offer per product).
+    // object or a list of Offers; we take the first for the Product-level
+    // price (typical retailer layout — one offer per product), but every
+    // offer in an array becomes its own Offer node below.
     let offer_obj = obj
         .get("offers")
         .and_then(|o| if o.is_array() { o.get(0) } else { Some(o) });
     let offer_price = offer_obj.and_then(|o| o.get("price"));
-    let props = platform_json::with_normalized_price(obj, offer_price, scale, None);
+    let priced = platform_json::with_normalized_price(obj, offer_price, scale, None);
+
+    // Inline scalar props onto the Product so single-node Cypher works without
+    // a hop: offer availability/condition/validity/seller, the GTIN/MPN/SKU
+    // identity keys, and the aggregateRating value/count. These are JSON-LD
+    // (and platform-where-present) signals; absent fields are simply omitted.
+    let mut pm: serde_json::Map<String, Value> = serde_json::from_str(&priced).unwrap_or_default();
+    if let Some(o) = offer_obj {
+        for (src, dst) in [
+            ("availability", "availability"),
+            ("itemCondition", "item_condition"),
+            ("priceValidUntil", "price_valid_until"),
+        ] {
+            if let Some(v) = o.get(src).and_then(Value::as_str) {
+                pm.insert(dst.into(), schema_enum_tail(v).into());
+            }
+        }
+        if let Some(s) = o.get("seller").and_then(|s| s.get("name")).and_then(Value::as_str) {
+            pm.insert("seller_name".into(), s.into());
+        }
+    }
+    for (src, dst) in [("gtin13", "gtin13"), ("gtin", "gtin"), ("mpn", "mpn"), ("sku", "sku")] {
+        if let Some(v) = obj.get(src).and_then(Value::as_str) {
+            pm.insert(dst.into(), v.into());
+        }
+    }
+    if let Some(rating) = obj.get("aggregateRating") {
+        if let Some(rv) = rating.get("ratingValue") {
+            pm.insert("rating_value".into(), rv.clone());
+        }
+        if let Some(c) = rating.get("reviewCount").or_else(|| rating.get("ratingCount")) {
+            pm.insert("review_count".into(), c.clone());
+        }
+    }
+    let props = Value::Object(pm).to_string();
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &props);
 
+    ingest_brand(b, obj, product_idx);
+    ingest_manufacturer(b, obj, product_idx);
+    ingest_offers(b, obj, &id, product_idx);
+    ingest_aggregate_rating(b, obj, &id, product_idx);
+    ingest_reviews(b, obj, &id, product_idx);
+}
+
+/// schema.org enum-valued props are URLs (`https://schema.org/InStock`); keep
+/// only the trailing token so `WHERE p.availability = "InStock"` reads cleanly.
+fn schema_enum_tail(v: &str) -> &str {
+    v.rsplit('/').next().unwrap_or(v)
+}
+
+/// `Product.brand` → Brand node + edge. `brand` may be an object (`{name}`) or
+/// a bare string.
+fn ingest_brand(b: &mut GraphBuilder, obj: &Value, product_idx: u32) {
     if let Some(brand) = obj.get("brand") {
         let bname = brand
             .get("name")
@@ -247,26 +325,94 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
             b.add_edge(product_idx, RelType::Brand, bname);
         }
     }
+}
 
-    if let Some(o) = offer_obj {
-        let offer_id = format!("{id}#offer");
-        let price = o.get("price").map(|v| v.to_string()).unwrap_or_default();
-        b.upsert_node(NodeKind::Offer, &offer_id, &price, &o.to_string());
-        b.add_edge(product_idx, RelType::Offers, &offer_id);
+/// `Product.manufacturer` → Organization node + Manufacturer edge. Distinct
+/// from Brand: the brand is the marketing label, the manufacturer the legal
+/// maker (they often differ in electronics / regulated goods).
+fn ingest_manufacturer(b: &mut GraphBuilder, obj: &Value, product_idx: u32) {
+    if let Some(mfr) = obj.get("manufacturer") {
+        let mname = mfr
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| mfr.as_str())
+            .unwrap_or("");
+        if !mname.is_empty() {
+            b.upsert_node(NodeKind::Organization, mname, mname, &mfr.to_string());
+            b.add_edge(product_idx, RelType::Manufacturer, mname);
+        }
     }
+}
 
-    if let Some(rating) = obj.get("aggregateRating") {
-        let rating_id = format!("{id}#rating");
-        let rv = rating
-            .get("ratingValue")
-            .map(|v| v.to_string())
-            .unwrap_or_default();
-        b.upsert_node(
-            NodeKind::AggregateRating,
-            &rating_id,
-            &rv,
-            &rating.to_string(),
-        );
-        b.add_edge(product_idx, RelType::AggregateRating, &rating_id);
+/// `Product.offers` → one Offer node per offer (an array carries multiple
+/// seller/price offers), each edged Product-[:Offers]->Offer. A single offer
+/// object keeps the bare `{id}#offer` id so existing graphs don't churn; array
+/// elements get `{id}#offer{n}`.
+fn ingest_offers(b: &mut GraphBuilder, obj: &Value, id: &str, product_idx: u32) {
+    let Some(offers) = obj.get("offers") else {
+        return;
+    };
+    let emit = |b: &mut GraphBuilder, o: &Value, offer_id: &str| {
+        let price = o.get("price").map(|v| v.to_string()).unwrap_or_default();
+        b.upsert_node(NodeKind::Offer, offer_id, &price, &o.to_string());
+        b.add_edge(product_idx, RelType::Offers, offer_id);
+    };
+    match offers.as_array() {
+        Some(arr) => {
+            for (n, o) in arr.iter().enumerate() {
+                emit(b, o, &format!("{id}#offer{n}"));
+            }
+        }
+        None => emit(b, offers, &format!("{id}#offer")),
+    }
+}
+
+/// `Product.aggregateRating` → AggregateRating node (rating_value / review_count
+/// hoisted to queryable scalars) + edge.
+fn ingest_aggregate_rating(b: &mut GraphBuilder, obj: &Value, id: &str, product_idx: u32) {
+    let Some(rating) = obj.get("aggregateRating") else {
+        return;
+    };
+    let rating_id = format!("{id}#rating");
+    let rv = rating.get("ratingValue").map(|v| v.to_string()).unwrap_or_default();
+    let mut rm = rating.as_object().cloned().unwrap_or_default();
+    if let Some(c) = rating.get("reviewCount").or_else(|| rating.get("ratingCount")) {
+        rm.insert("review_count".into(), c.clone());
+    }
+    if let Some(v) = rating.get("ratingValue") {
+        rm.insert("rating_value".into(), v.clone());
+    }
+    b.upsert_node(NodeKind::AggregateRating, &rating_id, &rv, &Value::Object(rm).to_string());
+    b.add_edge(product_idx, RelType::AggregateRating, &rating_id);
+}
+
+/// `Product.review` → Review nodes (rating_value / date hoisted) + edge, and
+/// each review's `author` → Person node + Author edge. `review` may be a single
+/// object or an array.
+fn ingest_reviews(b: &mut GraphBuilder, obj: &Value, id: &str, product_idx: u32) {
+    let reviews = match obj.get("review") {
+        Some(Value::Array(arr)) => arr.clone(),
+        Some(one) => vec![one.clone()],
+        None => return,
+    };
+    for (i, rv) in reviews.iter().enumerate() {
+        let rid = format!("{id}#review{i}");
+        let body = rv.get("reviewBody").and_then(Value::as_str).unwrap_or("");
+        let mut rm = rv.as_object().cloned().unwrap_or_default();
+        if let Some(r) = rv.get("reviewRating").and_then(|x| x.get("ratingValue")) {
+            rm.insert("rating_value".into(), r.clone());
+        }
+        if let Some(d) = rv.get("datePublished") {
+            rm.insert("date".into(), d.clone());
+        }
+        let review_idx = b.upsert_node(NodeKind::Review, &rid, body, &Value::Object(rm).to_string());
+        b.add_edge(product_idx, RelType::Review, &rid);
+
+        let author = rv.get("author");
+        let aname = author.and_then(|a| a.get("name").and_then(Value::as_str).or_else(|| a.as_str()));
+        if let Some(an) = aname.filter(|s| !s.is_empty()) {
+            b.upsert_node(NodeKind::Person, an, an, &author.map(|a| a.to_string()).unwrap_or_default());
+            b.add_edge(review_idx, RelType::Author, an);
+        }
     }
 }
