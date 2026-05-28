@@ -183,7 +183,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "esg-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "esg-core",
@@ -192,7 +192,7 @@ dependencies = [
 
 [[package]]
 name = "esg-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "memmap2",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "esg-extract"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "esg-core",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "esg-py"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "esg-core",
  "esg-extract",

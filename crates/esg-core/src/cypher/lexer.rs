@@ -145,6 +145,27 @@ pub fn tokenize(input: &str) -> Result<Vec<Token>, String> {
                 out.push(Token::Str(input[start..j].to_string()));
                 i = j + 1;
             }
+            // Backtick-quoted identifier — Neo4j-standard escape for identifiers
+            // containing dots, spaces, or other non-ident chars (e.g. `p.name`).
+            // Emitted as a normal Ident token so downstream parsing code
+            // (alias slot in parse_return_item, future label/property names)
+            // sees no difference between `foo` and just foo. The inner bytes
+            // are taken verbatim — no `\` escape processing, matching Neo4j.
+            '`' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < bytes.len() && bytes[j] != b'`' {
+                    j += 1;
+                }
+                if j >= bytes.len() {
+                    return Err(format!("unterminated backtick identifier at {i}"));
+                }
+                if j == start {
+                    return Err(format!("empty backtick identifier at {i}"));
+                }
+                out.push(Token::Ident(input[start..j].to_string()));
+                i = j + 1;
+            }
             c if c.is_ascii_digit() => {
                 let start = i;
                 let mut seen_dot = false;

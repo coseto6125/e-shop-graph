@@ -262,3 +262,60 @@ fn multi_hop_with_inline_still_works() {
     );
     assert_eq!(rows.len(), 1); // only p1 (Nike) has a variant
 }
+
+// Backtick-quoted identifier (Neo4j standard) — enables column names
+// containing dots or spaces, the natural shape for "preserve the source
+// column name in the result" use cases like enoract's
+// _graph_rows_to_search_docs which keys off `<var>.<prop>` literally.
+
+#[test]
+fn backtick_alias_with_dot() {
+    let bytes = sample_graph_bytes();
+    let g = rkyv::access::<ArchivedGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let res = cypher::query(
+        g,
+        "MATCH (p:Product) RETURN p.price_cents AS `p.name` LIMIT 1",
+    )
+    .unwrap();
+    assert_eq!(res.columns, vec!["p.name"]);
+}
+
+#[test]
+fn backtick_alias_with_space() {
+    let bytes = sample_graph_bytes();
+    let g = rkyv::access::<ArchivedGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let res = cypher::query(
+        g,
+        "MATCH (p:Product) RETURN p.name AS `product name` LIMIT 1",
+    )
+    .unwrap();
+    assert_eq!(res.columns, vec!["product name"]);
+}
+
+#[test]
+fn backtick_alias_interchangeable_with_plain_ident() {
+    // Backtick wrapping must not change behaviour for ordinary identifiers —
+    // `pname` resolves identically to plain pname.
+    let bytes = sample_graph_bytes();
+    let g = rkyv::access::<ArchivedGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let r1 = cypher::query(g, "MATCH (p:Product) RETURN p.name AS pname LIMIT 1").unwrap();
+    let r2 = cypher::query(g, "MATCH (p:Product) RETURN p.name AS `pname` LIMIT 1").unwrap();
+    assert_eq!(r1.columns, r2.columns);
+    assert_eq!(r1.rows, r2.rows);
+}
+
+#[test]
+fn unterminated_backtick_errors() {
+    let bytes = sample_graph_bytes();
+    let g = rkyv::access::<ArchivedGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let err = cypher::query(g, "MATCH (p:Product) RETURN p.name AS `oops").unwrap_err();
+    assert!(err.contains("unterminated backtick"), "got: {err}");
+}
+
+#[test]
+fn empty_backtick_errors() {
+    let bytes = sample_graph_bytes();
+    let g = rkyv::access::<ArchivedGraph, rkyv::rancor::Error>(&bytes).unwrap();
+    let err = cypher::query(g, "MATCH (p:Product) RETURN p.name AS `` LIMIT 1").unwrap_err();
+    assert!(err.contains("empty backtick"), "got: {err}");
+}
