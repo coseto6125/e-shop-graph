@@ -148,12 +148,24 @@ impl PriceScale {
         if let Some(peer) = peer_whole.filter(|p| p.is_sign_positive() && !p.is_zero()) {
             // Use a Decimal-safe ratio: subtract instead of divide so f64
             // rounding never reaches us. r ≈ n / peer.
-            let hundred_peer = peer * Decimal::ONE_HUNDRED;
-            let one_peer = peer;
-            if (n - hundred_peer).abs() < (peer / Decimal::TWO) {
+            // `checked_*` throughout: a crafted peer/n near Decimal::MAX overflows
+            // the ×100 or the subtraction, and `Decimal`'s `*` / `-` PANIC on
+            // overflow. Such magnitudes are not real prices — on overflow we
+            // simply skip cross-field corroboration (score stays low) instead of
+            // crashing. `is_cents` / `is_whole` are None when the math overflowed.
+            let is_cents = peer
+                .checked_mul(Decimal::ONE_HUNDRED)
+                .and_then(|hundred_peer| n.checked_sub(hundred_peer))
+                .map(|diff| diff.abs() < (peer / Decimal::TWO))
+                .unwrap_or(false);
+            let is_whole = n
+                .checked_sub(peer)
+                .map(|diff| diff.abs() < (peer / Decimal::from(100)))
+                .unwrap_or(false);
+            if is_cents {
                 whole = Some(n / Decimal::ONE_HUNDRED); // this value is in cents
                 score += 3;
-            } else if (n - one_peer).abs() < (peer / Decimal::from(100)) {
+            } else if is_whole {
                 whole = Some(n); // already whole units
                 score += 3;
             }
@@ -466,17 +478,23 @@ fn detect_currency(html: &str) -> &'static str {
 
 /// Read an ISO-4217 code (3 uppercase letters) appearing shortly after `key`.
 fn iso_code_after(html: &str, key: &str) -> Option<&'static str> {
+    // `key` is ASCII so `at` lands on a char boundary, but `at + 16` may fall
+    // mid-codepoint — slicing `&html[at..at+16]` there panics. Scan the raw
+    // bytes of the 16-byte window directly (the ISO code is 3 ASCII uppercase
+    // letters; non-ASCII bytes simply fail the uppercase test), so no string
+    // slice is taken on an unaligned boundary.
     let at = html.find(key)? + key.len();
-    let tail = &html[at..(at + 16).min(html.len())];
-    // find first run of 3 consecutive uppercase ASCII letters
-    let bytes = tail.as_bytes();
+    let bytes = html.as_bytes();
+    let end = (at + 16).min(bytes.len());
+    let window = &bytes[at..end];
     let mut i = 0;
-    while i + 3 <= bytes.len() {
-        if bytes[i].is_ascii_uppercase()
-            && bytes[i + 1].is_ascii_uppercase()
-            && bytes[i + 2].is_ascii_uppercase()
+    while i + 3 <= window.len() {
+        if window[i].is_ascii_uppercase()
+            && window[i + 1].is_ascii_uppercase()
+            && window[i + 2].is_ascii_uppercase()
         {
-            return iso4217(&tail[i..i + 3]);
+            // The 3 bytes are ASCII letters, so this is always valid UTF-8.
+            return iso4217(std::str::from_utf8(&window[i..i + 3]).ok()?);
         }
         i += 1;
     }
@@ -623,5 +641,32 @@ mod tests {
         let v = scale.verdict(Some(&json!(50)), None).unwrap();
         // Currency empty → 2-dp default → "50" (50.00 strips to "50").
         assert_eq!((v.price.as_str(), v.confident()), ("50", false));
+    }
+
+    /// Regression: a multibyte UTF-8 char in the 16-byte window after a currency
+    /// key used to make `&html[at..at+16]` slice on a non-char boundary → panic.
+    /// `from_html` must complete; the explicit ISO code is still read.
+    #[test]
+    fn detect_currency_multibyte_after_key_no_panic() {
+        // CJK runs right up against the currency value so the 16-byte window
+        // ends mid-codepoint.
+        let html = r#"{"priceCurrency":"TWD"}限時搶購咖啡豆特價"#;
+        assert_eq!(PriceScale::from_html(html).currency, "TWD");
+        // Window that ends inside a CJK char with no ISO code present.
+        let html2 = r#"{"currency":"日本語テキストです"}"#;
+        assert_eq!(PriceScale::from_html(html2).currency, "");
+    }
+
+    /// Regression: a peer near Decimal::MAX overflowed `peer * ONE_HUNDRED`, and
+    /// Decimal's `*` panics on overflow. verdict() must return a low-confidence
+    /// result instead of crashing.
+    #[test]
+    fn verdict_huge_peer_does_not_panic() {
+        let scale = PriceScale::from_html("<p>no anchors</p>");
+        // ~7.9e28, large enough that ×100 overflows Decimal.
+        let huge = Decimal::from_str_exact("79000000000000000000000000000").unwrap();
+        let v = scale.verdict(Some(&json!(790)), Some(huge)).unwrap();
+        // Cross-field corroboration is skipped (overflow) → no +3 from signal 1.
+        assert!(!v.confident());
     }
 }
