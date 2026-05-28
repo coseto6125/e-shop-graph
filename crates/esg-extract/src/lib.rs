@@ -261,13 +261,12 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
         .get("offers")
         .and_then(|o| if o.is_array() { o.get(0) } else { Some(o) });
     let offer_price = offer_obj.and_then(|o| o.get("price"));
-    let priced = platform_json::with_normalized_price(obj, offer_price, scale, None);
-
-    // Inline scalar props onto the Product so single-node Cypher works without
-    // a hop: offer availability/condition/validity/seller, the GTIN/MPN/SKU
-    // identity keys, and the aggregateRating value/count. These are JSON-LD
-    // (and platform-where-present) signals; absent fields are simply omitted.
-    let mut pm: serde_json::Map<String, Value> = serde_json::from_str(&priced).unwrap_or_default();
+    // Start from the normalized-price Map directly (no serialize→parse round
+    // trip) and inline scalar props onto the Product so single-node Cypher
+    // works without a hop: offer availability/condition/validity/seller, the
+    // GTIN/MPN/SKU identity keys, and the aggregateRating value/count. These
+    // are JSON-LD (and platform-where-present) signals; absent fields omitted.
+    let mut pm = platform_json::normalized_price_map(obj, offer_price, scale, None);
     if let Some(o) = offer_obj {
         for (src, dst) in [
             ("availability", "availability"),
@@ -298,8 +297,10 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
     let props = Value::Object(pm).to_string();
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &props);
 
-    ingest_brand(b, obj, product_idx);
-    ingest_manufacturer(b, obj, product_idx);
+    // brand = marketing label, manufacturer = legal maker (distinct nodes;
+    // they often differ in electronics / regulated goods).
+    ingest_named_entity(b, obj, "brand", NodeKind::Brand, RelType::Brand, product_idx);
+    ingest_named_entity(b, obj, "manufacturer", NodeKind::Organization, RelType::Manufacturer, product_idx);
     ingest_offers(b, obj, &id, product_idx);
     ingest_aggregate_rating(b, obj, &id, product_idx);
     ingest_reviews(b, obj, &id, product_idx);
@@ -311,35 +312,26 @@ fn schema_enum_tail(v: &str) -> &str {
     v.rsplit('/').next().unwrap_or(v)
 }
 
-/// `Product.brand` → Brand node + edge. `brand` may be an object (`{name}`) or
-/// a bare string.
-fn ingest_brand(b: &mut GraphBuilder, obj: &Value, product_idx: u32) {
-    if let Some(brand) = obj.get("brand") {
-        let bname = brand
+/// Wire a named sub-entity (`brand` → Brand, `manufacturer` → Organization)
+/// into its own node + edge. The field value may be an object (`{name}`) or a
+/// bare string; the node is keyed and named by that name.
+fn ingest_named_entity(
+    b: &mut GraphBuilder,
+    obj: &Value,
+    field: &str,
+    kind: NodeKind,
+    rel: RelType,
+    product_idx: u32,
+) {
+    if let Some(entity) = obj.get(field) {
+        let name = entity
             .get("name")
             .and_then(Value::as_str)
-            .or_else(|| brand.as_str())
+            .or_else(|| entity.as_str())
             .unwrap_or("");
-        if !bname.is_empty() {
-            b.upsert_node(NodeKind::Brand, bname, bname, &brand.to_string());
-            b.add_edge(product_idx, RelType::Brand, bname);
-        }
-    }
-}
-
-/// `Product.manufacturer` → Organization node + Manufacturer edge. Distinct
-/// from Brand: the brand is the marketing label, the manufacturer the legal
-/// maker (they often differ in electronics / regulated goods).
-fn ingest_manufacturer(b: &mut GraphBuilder, obj: &Value, product_idx: u32) {
-    if let Some(mfr) = obj.get("manufacturer") {
-        let mname = mfr
-            .get("name")
-            .and_then(Value::as_str)
-            .or_else(|| mfr.as_str())
-            .unwrap_or("");
-        if !mname.is_empty() {
-            b.upsert_node(NodeKind::Organization, mname, mname, &mfr.to_string());
-            b.add_edge(product_idx, RelType::Manufacturer, mname);
+        if !name.is_empty() {
+            b.upsert_node(kind, name, name, &entity.to_string());
+            b.add_edge(product_idx, rel, name);
         }
     }
 }
@@ -390,9 +382,11 @@ fn ingest_aggregate_rating(b: &mut GraphBuilder, obj: &Value, id: &str, product_
 /// each review's `author` → Person node + Author edge. `review` may be a single
 /// object or an array.
 fn ingest_reviews(b: &mut GraphBuilder, obj: &Value, id: &str, product_idx: u32) {
-    let reviews = match obj.get("review") {
-        Some(Value::Array(arr)) => arr.clone(),
-        Some(one) => vec![one.clone()],
+    // Borrow the reviews in place — `review` is an array or a single object;
+    // `from_ref` views the single object as a 1-element slice with no clone.
+    let reviews: &[Value] = match obj.get("review") {
+        Some(Value::Array(arr)) => arr,
+        Some(one) => std::slice::from_ref(one),
         None => return,
     };
     for (i, rv) in reviews.iter().enumerate() {

@@ -37,13 +37,9 @@ impl LoadedGraph {
         // Validate + locate the archived root within the mapped bytes.
         let archived = rkyv::access::<ArchivedGraph, rkyv::rancor::Error>(&mmap[..])
             .context("rkyv access (corrupt graph.bin?)")?;
-        // rkyv::access validates archive STRUCTURE (relative pointers, Vec
-        // layouts) but treats our cross-field invariants as opaque integers: a
-        // crafted/old/foreign graph.bin can pass access yet carry CSR offsets,
-        // edge targets, or Str slices that index out of bounds, panicking later
-        // in the executor. Reject such a file here — at the one load chokepoint
-        // every consumer (executor, graph.rs API, CLI) flows through — so a bad
-        // file is a recoverable error, never a downstream crash.
+        // Reject cross-field corruption that rkyv::access doesn't check (see
+        // validate_invariants) at the one load chokepoint every consumer flows
+        // through, so a bad file is a recoverable error, not a later crash.
         validate_invariants(archived)?;
         let ptr = archived as *const ArchivedGraph;
         Ok(Self { _mmap: mmap, ptr })

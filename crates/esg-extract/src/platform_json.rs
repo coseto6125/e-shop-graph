@@ -174,6 +174,18 @@ pub(crate) fn with_normalized_price(
     scale: &PriceScale,
     peer_whole: Option<Decimal>,
 ) -> String {
+    Value::Object(normalized_price_map(obj, price_field, scale, peer_whole)).to_string()
+}
+
+/// As `with_normalized_price` but returns the `Map` so a caller that needs to
+/// inject further fields (JSON-LD ingest merges offer/rating/identity scalars)
+/// can do so without a serialize→parse round-trip on the way through.
+pub(crate) fn normalized_price_map(
+    obj: &Value,
+    price_field: Option<&Value>,
+    scale: &PriceScale,
+    peer_whole: Option<Decimal>,
+) -> serde_json::Map<String, Value> {
     let mut map = obj.as_object().cloned().unwrap_or_default();
     if let Some(v) = scale.verdict(price_field, peer_whole) {
         // Pull primitive fields off before the String move so the verdict is
@@ -186,5 +198,5 @@ pub(crate) fn with_normalized_price(
         map.insert("price_confident".into(), Value::Bool(confident));
         map.insert("price_score".into(), Value::Number(score.into()));
     }
-    Value::Object(map).to_string()
+    map
 }
