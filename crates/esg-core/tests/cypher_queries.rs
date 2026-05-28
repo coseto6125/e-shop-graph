@@ -319,3 +319,42 @@ fn empty_backtick_errors() {
     let err = cypher::query(g, "MATCH (p:Product) RETURN p.name AS `` LIMIT 1").unwrap_err();
     assert!(err.contains("empty backtick"), "got: {err}");
 }
+
+/// A small graph whose `sku` is a leading-zero string and whose `color` is a
+/// non-numeric string, for identity / cross-type comparison tests.
+fn identity_graph_bytes() -> Vec<u8> {
+    let mut b = GraphBuilder::new();
+    b.upsert_node(NodeKind::Product, "a", "A", r#"{"sku":"0123","color":"red"}"#);
+    b.upsert_node(NodeKind::Product, "b", "B", r#"{"sku":"456","color":"blue"}"#);
+    rkyv::to_bytes::<rkyv::rancor::Error>(&b.build()).unwrap().to_vec()
+}
+
+/// Regression: a leading-zero SKU string ("0123") was coerced to Int(123),
+/// losing identity — `RETURN p.sku` returned a number and `WHERE p.sku="0123"`
+/// matched nothing. It must stay a string.
+#[test]
+fn leading_zero_sku_keeps_string_identity() {
+    let bytes = identity_graph_bytes();
+    let rows = run(&bytes, r#"MATCH (p:Product) WHERE p.sku = "0123" RETURN p.sku"#);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], Value::Str("0123".into()));
+}
+
+/// Regression: cross-type `<>` returned false (ord=None fell through), so
+/// `WHERE p.color <> 5` excluded every string-valued row. Two non-null values
+/// of different types are not equal, so `<>` must be true.
+#[test]
+fn ne_across_types_is_true() {
+    let bytes = identity_graph_bytes();
+    let rows = run(&bytes, "MATCH (p:Product) WHERE p.color <> 5 RETURN p.name");
+    assert_eq!(rows.len(), 2); // both string colors are != the int 5
+}
+
+/// A comparison against a missing (Null) property is never true, including
+/// `<>` — Cypher 3-valued logic.
+#[test]
+fn ne_against_missing_property_is_false() {
+    let bytes = identity_graph_bytes();
+    let rows = run(&bytes, "MATCH (p:Product) WHERE p.nonexistent <> 5 RETURN p.name");
+    assert!(rows.is_empty());
+}

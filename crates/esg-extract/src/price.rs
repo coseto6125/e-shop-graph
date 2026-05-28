@@ -419,25 +419,24 @@ fn is_currency_symbol(c: char) -> bool {
         || matches!(c, '元' | '圆' | '圓' | '円' | '원')
 }
 
-/// Parse a number token (`1,990.00`, `79000`, `19,99`) to whole units. A
-/// trailing 2-digit group after the final separator is treated as a fractional
-/// part and dropped; otherwise the value is integral.
+/// Parse a number token (`1,990.00`, `79000`, `19,99`, `5.5`) to whole units.
+/// The trailing group after the LAST separator is a fractional part — and is
+/// dropped — when it has 1 or 2 digits (`5.5`→5, `19,99`→19, `4.20`→4); a
+/// 3-digit trailing group is a thousands group, so the separator is grouping
+/// and all digits are integral (`1,200`→1200, `12.345`→12345). A token with no
+/// separator is integral (`79000`). This fixes the earlier "exactly 2 digits"
+/// rule that left a single decimal place (`5.5`) glued on as `55`.
 fn whole_units(token: &str) -> Option<u64> {
-    let digits: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
+    let all_digits: String = token.chars().filter(|c| c.is_ascii_digit()).collect();
+    if all_digits.is_empty() {
         return None;
     }
-    // If the token ends in a separator + exactly 2 digits, those are cents.
-    let bytes = token.as_bytes();
-    let tail_is_fraction = token.len() >= 3
-        && (bytes[token.len() - 3] == b'.' || bytes[token.len() - 3] == b',')
-        && bytes[token.len() - 2].is_ascii_digit()
-        && bytes[token.len() - 1].is_ascii_digit();
-    let whole_digits = if tail_is_fraction {
-        &digits[..digits.len() - 2]
-    } else {
-        &digits[..]
-    };
+    let frac_len = token
+        .rfind(['.', ','])
+        .map(|sep| token[sep + 1..].chars().filter(|c| c.is_ascii_digit()).count())
+        .filter(|&n| n == 1 || n == 2) // 1–2 trailing digits = cents; 3 = grouping
+        .unwrap_or(0);
+    let whole_digits = &all_digits[..all_digits.len() - frac_len];
     whole_digits.parse::<u64>().ok().filter(|&v| v > 0)
 }
 
@@ -476,25 +475,36 @@ fn detect_currency(html: &str) -> &'static str {
     }
 }
 
-/// Read an ISO-4217 code (3 uppercase letters) appearing shortly after `key`.
+/// Read an ISO-4217 code (3 ASCII letters) appearing shortly after `key`. The
+/// letters may be lower- or mixed-case (`"currency":"usd"` is common); they are
+/// upper-cased before the `iso4217` whitelist lookup, which rejects any 3-letter
+/// run that isn't a recognised code — so case-insensitivity can't fabricate a
+/// currency from arbitrary prose.
 fn iso_code_after(html: &str, key: &str) -> Option<&'static str> {
     // `key` is ASCII so `at` lands on a char boundary, but `at + 16` may fall
     // mid-codepoint — slicing `&html[at..at+16]` there panics. Scan the raw
-    // bytes of the 16-byte window directly (the ISO code is 3 ASCII uppercase
-    // letters; non-ASCII bytes simply fail the uppercase test), so no string
-    // slice is taken on an unaligned boundary.
+    // bytes of the 16-byte window directly (the code is 3 ASCII letters;
+    // non-ASCII bytes fail the alphabetic test), so no string slice is taken on
+    // an unaligned boundary.
     let at = html.find(key)? + key.len();
     let bytes = html.as_bytes();
     let end = (at + 16).min(bytes.len());
     let window = &bytes[at..end];
     let mut i = 0;
     while i + 3 <= window.len() {
-        if window[i].is_ascii_uppercase()
-            && window[i + 1].is_ascii_uppercase()
-            && window[i + 2].is_ascii_uppercase()
+        if window[i].is_ascii_alphabetic()
+            && window[i + 1].is_ascii_alphabetic()
+            && window[i + 2].is_ascii_alphabetic()
         {
-            // The 3 bytes are ASCII letters, so this is always valid UTF-8.
-            return iso4217(std::str::from_utf8(&window[i..i + 3]).ok()?);
+            let upper = [
+                window[i].to_ascii_uppercase(),
+                window[i + 1].to_ascii_uppercase(),
+                window[i + 2].to_ascii_uppercase(),
+            ];
+            // 3 ASCII letters → always valid UTF-8.
+            if let Some(code) = iso4217(std::str::from_utf8(&upper).unwrap()) {
+                return Some(code);
+            }
         }
         i += 1;
     }
@@ -668,5 +678,31 @@ mod tests {
         let v = scale.verdict(Some(&json!(790)), Some(huge)).unwrap();
         // Cross-field corroboration is skipped (overflow) → no +3 from signal 1.
         assert!(!v.confident());
+    }
+
+    /// Regression: a single-decimal token ("5.5") used to keep both digits
+    /// ("55") because the cents-strip required exactly 2 trailing digits. The
+    /// fractional part (1 OR 2 digits) is now dropped; a 3-digit trailing group
+    /// is thousands grouping, so those digits stay.
+    #[test]
+    fn whole_units_handles_single_and_double_decimals() {
+        assert_eq!(whole_units("5.5"), Some(5)); // single decimal → 5, not 55
+        assert_eq!(whole_units("4.20"), Some(4)); // two decimals → 4
+        assert_eq!(whole_units("19,99"), Some(19)); // European decimal → 19
+        assert_eq!(whole_units("1,200"), Some(1200)); // 3-digit group = thousands
+        assert_eq!(whole_units("1,990.00"), Some(1990)); // grouping + cents
+        assert_eq!(whole_units("79000"), Some(79000)); // no separator → integral
+    }
+
+    /// Regression: a lower-case ISO code in a currency field ("usd") was missed
+    /// because the scan required uppercase. It is now upper-cased before the
+    /// whitelist lookup.
+    #[test]
+    fn detect_currency_lowercase_iso_code() {
+        let html = r#"{"currency":"usd"} price 19.99"#;
+        assert_eq!(PriceScale::from_html(html).currency, "USD");
+        // A non-code 3-letter lowercase run must NOT fabricate a currency.
+        let html2 = r#"{"currency":"the quick"}"#;
+        assert_eq!(PriceScale::from_html(html2).currency, "");
     }
 }

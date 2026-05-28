@@ -507,18 +507,44 @@ fn read_prop(graph: &ArchivedGraph, node_idx: u32, prop: &str) -> Value {
 /// currency-aware string the extractor produced.
 const STRING_ONLY_PROPS: &[&str] = &["price"];
 
+/// True for a canonical base-10 number string safe to coerce to Int/Float:
+/// optional leading `-`, ASCII digits, at most one `.`, no scientific notation,
+/// and no significant leading zero (so a leading-zero identifier like "0123"
+/// stays a string). "0" and "0.5" are allowed; "00", "0123", "1e5", "1,000",
+/// "" are not.
+fn is_plain_decimal(s: &str) -> bool {
+    let body = s.strip_prefix('-').unwrap_or(s);
+    let int_part = match body.split_once('.') {
+        Some((i, f)) => {
+            if f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            i
+        }
+        None => body,
+    };
+    if int_part.is_empty() || !int_part.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    // Reject a leading zero on a multi-digit integer part ("0123"), but allow a
+    // lone "0" and the "0" before a decimal point ("0.5").
+    !(int_part.len() > 1 && int_part.starts_with('0'))
+}
+
 fn json_to_value(prop: &str, v: Option<&serde_json::Value>) -> Value {
     match v {
         Some(serde_json::Value::String(s)) => {
-            if STRING_ONLY_PROPS.contains(&prop) {
-                // Preserve the display string verbatim. Filtering by numeric
-                // magnitude on these properties is a category error; consumers
-                // who need it parse the string explicitly or query a
-                // sibling numeric field (e.g. `price_score`).
+            if STRING_ONLY_PROPS.contains(&prop) || !is_plain_decimal(s) {
+                // Preserve the display string verbatim for `price`, and for any
+                // value that isn't a plain decimal number — an identifier like a
+                // leading-zero SKU ("0123") or a scientific-notation token
+                // ("1e5") must keep its string identity, or `RETURN p.sku` would
+                // hand back Int(123) and `WHERE p.sku = "0123"` would match
+                // nothing. Filtering by magnitude on these is a category error.
                 return Value::Str(s.clone());
             }
-            // Other numeric-looking strings ("299.99" sitting on some legacy
-            // field) coerce so `p.foo < 200` works without quoting.
+            // Plain decimal strings ("299.99" on some legacy field) coerce so
+            // `p.foo < 200` works without quoting.
             if let Ok(i) = s.parse::<i64>() {
                 Value::Int(i)
             } else if let Ok(f) = s.parse::<f64>() {
@@ -536,6 +562,12 @@ fn json_to_value(prop: &str, v: Option<&serde_json::Value>) -> Value {
 
 fn compare(l: &Value, r: &Value, op: Op) -> bool {
     use std::cmp::Ordering;
+    // Cypher 3-valued logic: any comparison involving Null is "not true" — it
+    // never satisfies a WHERE, including `<>`. Handle it before the type match
+    // so `p.missing <> 5` doesn't wrongly pull in null-property rows.
+    if matches!(l, Value::Null) || matches!(r, Value::Null) {
+        return false;
+    }
     let ord = match (as_f64(l), as_f64(r)) {
         (Some(a), Some(b)) => a.partial_cmp(&b),
         _ => match (l, r) {
@@ -547,6 +579,11 @@ fn compare(l: &Value, r: &Value, op: Op) -> bool {
     match (op, ord) {
         (Op::Eq, Some(Ordering::Equal)) => true,
         (Op::Ne, Some(o)) => o != Ordering::Equal,
+        // Two non-null values of incomparable types (Str vs Int, Bool vs Int)
+        // are definitively NOT equal, so `<>` is true and `=` is false; the
+        // ordering operators have no meaning across types and stay false.
+        (Op::Eq, None) => false,
+        (Op::Ne, None) => true,
         (Op::Lt, Some(Ordering::Less)) => true,
         (Op::Le, Some(o)) => o != Ordering::Greater,
         (Op::Gt, Some(Ordering::Greater)) => true,
