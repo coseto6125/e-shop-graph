@@ -154,7 +154,11 @@ fn whole_unit_peer(p: &Value) -> Option<f64> {
 /// and `price_confident` injected. Unit is scored from independent signals
 /// (JSON cross-field via `peer_whole`, page anchors, recurrence) per
 /// `PriceVerdict`; the original `price` is kept for provenance.
-fn with_normalized_price(
+///
+/// Crate-visible so JSON-LD ingest (`lib::ingest_object`) shares the same
+/// normalization path as every other source — one price contract across
+/// platform_json / dom_attr / next_data / microdata / jsonld.
+pub(crate) fn with_normalized_price(
     obj: &Value,
     price_field: Option<&Value>,
     scale: &PriceScale,

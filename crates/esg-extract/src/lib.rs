@@ -138,7 +138,7 @@ fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::Pr
         }
         PageExtract::JsonLd(objects) => {
             for obj in objects {
-                ingest_object(builder, obj);
+                ingest_object(builder, obj, scale);
             }
         }
         PageExtract::Empty => {}
@@ -198,20 +198,41 @@ fn tracing_warn(path: &std::path::Path, e: &std::io::Error) {
 
 /// Map a single schema.org object onto graph nodes + edges. Currently handles
 /// the Product-centric core (Product/Offer/Brand/AggregateRating).
-fn ingest_object(b: &mut GraphBuilder, obj: &Value) {
+///
+/// Threading `scale` here keeps JSON-LD on the same normalization path as
+/// platform_json / dom_attr / next_data / microdata — Product nodes from
+/// any source carry the same `price_cents` / `currency` / `price_confident`
+/// schema, so cross-source Cypher (`WHERE p.price_cents < 5000`) hits
+/// every product regardless of how the page surfaced it.
+fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
     let ty = obj.get("@type").and_then(Value::as_str).unwrap_or("");
     if ty != "Product" {
         return;
     }
     let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
-    // Stable id: prefer @id, then sku, then name (last-resort).
+    // Stable id: prefer @id, then sku, then url, then name (last-resort).
+    // `url` is added between sku and name because real-world JSON-LD often
+    // omits @id/sku but always carries a canonical product URL — the same
+    // field other extractors key on. Falling through to `name` instead
+    // would collapse different products that happen to share a display
+    // name into one node.
     let id = obj
         .get("@id")
         .or_else(|| obj.get("sku"))
+        .or_else(|| obj.get("url"))
         .and_then(Value::as_str)
         .unwrap_or(name)
         .to_string();
-    let props = obj.to_string();
+
+    // Pull the offer's price field BEFORE the upsert so the Product node
+    // ships with normalized price props. JSON-LD `offers` may be an Offer
+    // object or a list of Offers; we take the first (typical retailer
+    // layout — one offer per product).
+    let offer_obj = obj
+        .get("offers")
+        .and_then(|o| if o.is_array() { o.get(0) } else { Some(o) });
+    let offer_price = offer_obj.and_then(|o| o.get("price"));
+    let props = platform_json::with_normalized_price(obj, offer_price, scale, None);
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &props);
 
     if let Some(brand) = obj.get("brand") {
@@ -226,18 +247,11 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value) {
         }
     }
 
-    if let Some(offer) = obj.get("offers") {
-        let offer_obj = if offer.is_array() {
-            offer.get(0)
-        } else {
-            Some(offer)
-        };
-        if let Some(o) = offer_obj {
-            let offer_id = format!("{id}#offer");
-            let price = o.get("price").map(|v| v.to_string()).unwrap_or_default();
-            b.upsert_node(NodeKind::Offer, &offer_id, &price, &o.to_string());
-            b.add_edge(product_idx, RelType::Offers, &offer_id);
-        }
+    if let Some(o) = offer_obj {
+        let offer_id = format!("{id}#offer");
+        let price = o.get("price").map(|v| v.to_string()).unwrap_or_default();
+        b.upsert_node(NodeKind::Offer, &offer_id, &price, &o.to_string());
+        b.add_edge(product_idx, RelType::Offers, &offer_id);
     }
 
     if let Some(rating) = obj.get("aggregateRating") {
