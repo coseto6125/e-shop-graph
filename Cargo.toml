@@ -3,14 +3,14 @@ members = ["crates/esg-core", "crates/esg-extract", "crates/esg-cli", "crates/es
 resolver = "2"
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 # Internal deps declared once so the version constraint tracks the workspace.
 [workspace.dependencies]
-esg-core = { path = "crates/esg-core", version = "0.5.0" }
-esg-extract = { path = "crates/esg-extract", version = "0.5.0" }
+esg-core = { path = "crates/esg-core", version = "0.6.0" }
+esg-extract = { path = "crates/esg-extract", version = "0.6.0" }
 
 # Shared third-party. rkyv drives the zero-copy graph.bin; scraper/serde_json
 # the JSON-LD extraction; rayon the per-page parallelism.
