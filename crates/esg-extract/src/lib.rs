@@ -10,6 +10,7 @@
 pub mod dom_attr;
 pub mod microdata;
 pub mod next_data;
+pub mod normalize;
 pub mod platform_json;
 pub mod price;
 
@@ -106,8 +107,14 @@ fn collect_objects(val: Value, out: &mut Vec<Value>) {
 /// touching the DOM or the price scale; the scale (a full visible-text scan)
 /// is built only once a source actually yields products. The DOM-based
 /// fallbacks (microdata, JSON-LD) share a single `Html::parse_document`.
-fn extract_page(html: &str) -> (PageExtract, price::PriceScale) {
-    let with_scale = |page| (page, price::PriceScale::from_html(html));
+fn extract_page(html: &str) -> (PageExtract, price::PriceScale, Option<String>) {
+    // Page origin (scheme://host) from og:url, shared across every extractor so
+    // relative product/image URLs become absolute. Read straight from the HTML
+    // (a meta tag) rather than parsing the DOM, so the JSON-only platform path
+    // pays nothing extra. None when the page has no og:url — absolutize() then
+    // leaves relative URLs as-is (better a relative URL than a wrong host).
+    let origin = page_og_origin(html);
+    let with_scale = |page| (page, price::PriceScale::from_html(html), origin.clone());
 
     if let Some(products) = platform_json::find_products_array(html) {
         if !products.is_empty() {
@@ -135,15 +142,37 @@ fn extract_page(html: &str) -> (PageExtract, price::PriceScale) {
     if !ld.objects.is_empty() {
         return with_scale(PageExtract::JsonLd(ld.objects));
     }
-    (PageExtract::Empty, price::PriceScale::empty())
+    (PageExtract::Empty, price::PriceScale::empty(), origin)
 }
 
-/// Fold one page's extraction result into the builder.
-fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::PriceScale) {
+/// Extract the page origin (`scheme://host`) from the `og:url` meta tag without
+/// parsing the DOM — a cheap substring scan, since the JSON-first path never
+/// builds a `Html` document. Returns None if there's no og:url or it's relative.
+fn page_og_origin(html: &str) -> Option<String> {
+    // Find the og:url meta, then the `content="…"` that follows it on the tag.
+    let tag_start = html.find("og:url")?;
+    let rest = &html[tag_start..];
+    let content_pos = rest.find("content=")?;
+    let after = &rest[content_pos + "content=".len()..];
+    let quote = after.chars().next().filter(|c| *c == '"' || *c == '\'')?;
+    let value = &after[1..];
+    let end = value.find(quote)?;
+    normalize::url_origin(value[..end].trim())
+}
+
+/// Fold one page's extraction result into the builder. `origin` (the page's
+/// og:url scheme://host) absolutizes relative product/image URLs uniformly
+/// across every extractor.
+fn ingest_into(
+    builder: &mut GraphBuilder,
+    page: &PageExtract,
+    scale: &price::PriceScale,
+    origin: Option<&str>,
+) {
     match page {
         PageExtract::Platform(products) => {
             for p in products {
-                platform_json::ingest_product(builder, p, scale);
+                platform_json::ingest_product(builder, p, scale, origin);
             }
         }
         PageExtract::DomAttr(products) => {
@@ -184,10 +213,10 @@ pub fn build_from_pages(pages: &[String]) -> Result<GraphBuilder> {
 /// is parallel (rayon); the ingest fold is serial because the builder is one
 /// shared mutable structure.
 pub fn ingest_pages_into(builder: &mut GraphBuilder, pages: &[String]) {
-    let per_page: Vec<(PageExtract, price::PriceScale)> =
+    let per_page: Vec<(PageExtract, price::PriceScale, Option<String>)> =
         pages.par_iter().map(|html| extract_page(html)).collect();
-    for (page, scale) in &per_page {
-        ingest_into(builder, page, scale);
+    for (page, scale, origin) in &per_page {
+        ingest_into(builder, page, scale, origin.as_deref());
     }
 }
 
@@ -218,8 +247,8 @@ pub fn build_from_files(paths: &[std::path::PathBuf]) -> Result<GraphBuilder> {
         // HTML may not be valid UTF-8 in the strict sense; lossy is fine for
         // extraction (we only read ASCII-structured JSON/attrs + text).
         let html = String::from_utf8_lossy(&mmap);
-        let (page, scale) = extract_page(&html);
-        ingest_into(&mut builder, &page, &scale);
+        let (page, scale, origin) = extract_page(&html);
+        ingest_into(&mut builder, &page, &scale, origin.as_deref());
         // mmap dropped here → page memory released before the next file.
     }
     Ok(builder)

@@ -210,3 +210,34 @@ fn name_present_across_sources() {
         );
     }
 }
+
+// Platform JSON with a RELATIVE product url + featured_image — the doni/easy.co
+// reality. Before 0.7.2 the inline-JSON path stored the url verbatim
+// (`/products/…`, a LINE-carousel 400) and never surfaced an `image` prop.
+const PLATFORM_RELATIVE_HTML: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://doni.example/products/dress">
+</head><body>
+<script>window.__data = {"products":[{"name":"Mermaid Dress","handle":"mermaid","url":"/products/mermaid","price":"690","currency_code":"TWD","featured_image":{"img_url":"https://cdn.example/m.jpg"}}]};</script>
+</body></html>"#;
+
+#[test]
+fn platform_json_absolutizes_relative_url() {
+    let rows = cypher_rows(PLATFORM_RELATIVE_HTML, "MATCH (p:Product) RETURN p.url");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        matches!(&rows[0][0], Value::Str(s) if s == "https://doni.example/products/mermaid"),
+        "inline-JSON relative url must absolutize against page og:url origin, got {:?}",
+        rows[0][0]
+    );
+}
+
+#[test]
+fn platform_json_surfaces_image_from_featured_image() {
+    let rows = cypher_rows(PLATFORM_RELATIVE_HTML, "MATCH (p:Product) RETURN p.image");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        matches!(&rows[0][0], Value::Str(s) if s == "https://cdn.example/m.jpg"),
+        "inline-JSON featured_image.img_url must surface as Product.image, got {:?}",
+        rows[0][0]
+    );
+}

@@ -82,7 +82,12 @@ pub const MAGIC: [u8; 4] = *b"ESG1";
 /// 4→5 (0.7.1): microdata extractor surfaces `Product.description` (og:description,
 ///   single-product pages only). Same opaque-JSON-props story as 3→4 — old graphs
 ///   load but lack the key, so the bump forces a rebuild to populate it.
-pub const VERSION: u32 = 5;
+/// 5→6 (0.7.2): platform_json (inline product JSON) now absolutizes its relative
+///   `url` against the page og:url origin and surfaces a single `image` prop
+///   (from featured_image / images[]) — previously only microdata did this, so
+///   inline-JSON products reached carousels with a relative `/products/…` uri
+///   (LINE 400) and no thumbnail. Rebuild to fix those URLs/images.
+pub const VERSION: u32 = 6;
 
 impl Graph {
     /// Resolve a `Str` slice against the pool. Panics on out-of-bounds — a
