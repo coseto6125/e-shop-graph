@@ -290,7 +290,11 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
     let id = obj
         .get("productId")
         .or_else(|| obj.get("id"))
-        .and_then(|v| v.as_str().map(str::to_string).or_else(|| v.as_i64().map(|n| n.to_string())))
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
         .filter(|s| !s.is_empty())
         .or_else(|| {
             obj.get("@id")

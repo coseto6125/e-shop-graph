@@ -159,7 +159,11 @@ impl GraphBuilder {
             let merged = merge_props(&old_props, props);
             let props_str = self.intern(&merged);
             // Keep the existing name when the incoming one is empty.
-            let name_str = if name.is_empty() { self.nodes[idx as usize].name } else { self.intern(name) };
+            let name_str = if name.is_empty() {
+                self.nodes[idx as usize].name
+            } else {
+                self.intern(name)
+            };
             let node = &mut self.nodes[idx as usize];
             node.kind = kind;
             node.name = name_str;
@@ -369,17 +373,41 @@ mod tests {
     fn upsert_merges_fields_blurbless_does_not_erase_description() {
         let mut b = GraphBuilder::new();
         // detail page first: has the blurb.
-        b.upsert_node(NodeKind::Product, "p1", "Tee", r#"{"url":"/p/tee","description":"soft cotton"}"#);
+        b.upsert_node(
+            NodeKind::Product,
+            "p1",
+            "Tee",
+            r#"{"url":"/p/tee","description":"soft cotton"}"#,
+        );
         // listing card second: image + price, no description, empty name.
-        b.upsert_node(NodeKind::Product, "p1", "", r#"{"url":"/p/tee","image":"https://cdn/t.jpg","description":""}"#);
+        b.upsert_node(
+            NodeKind::Product,
+            "p1",
+            "",
+            r#"{"url":"/p/tee","image":"https://cdn/t.jpg","description":""}"#,
+        );
         let g = b.build();
         assert_eq!(g.nodes.len(), 1);
         let (_, props) = node(&g, "p1").unwrap();
-        assert!(props.contains("soft cotton"), "description must survive a later blurb-less write: {props}");
-        assert!(props.contains("cdn/t.jpg"), "later image must be merged in: {props}");
+        assert!(
+            props.contains("soft cotton"),
+            "description must survive a later blurb-less write: {props}"
+        );
+        assert!(
+            props.contains("cdn/t.jpg"),
+            "later image must be merged in: {props}"
+        );
         // Empty incoming name kept the existing one.
-        let name = g.nodes.iter().find(|nd| g.str(&nd.id) == "p1").map(|nd| g.str(&nd.name)).unwrap();
-        assert_eq!(name, "Tee", "empty incoming name must not clobber the existing name");
+        let name = g
+            .nodes
+            .iter()
+            .find(|nd| g.str(&nd.id) == "p1")
+            .map(|nd| g.str(&nd.name))
+            .unwrap();
+        assert_eq!(
+            name, "Tee",
+            "empty incoming name must not clobber the existing name"
+        );
     }
 
     /// Reverse order must also hold: a blurb arriving AFTER a blurb-less card
@@ -387,11 +415,24 @@ mod tests {
     #[test]
     fn upsert_merges_fields_later_blurb_fills_empty() {
         let mut b = GraphBuilder::new();
-        b.upsert_node(NodeKind::Product, "p1", "Tee", r#"{"url":"/p/tee","description":""}"#);
-        b.upsert_node(NodeKind::Product, "p1", "Tee", r#"{"url":"/p/tee","description":"soft cotton"}"#);
+        b.upsert_node(
+            NodeKind::Product,
+            "p1",
+            "Tee",
+            r#"{"url":"/p/tee","description":""}"#,
+        );
+        b.upsert_node(
+            NodeKind::Product,
+            "p1",
+            "Tee",
+            r#"{"url":"/p/tee","description":"soft cotton"}"#,
+        );
         let g = b.build();
         let (_, props) = node(&g, "p1").unwrap();
-        assert!(props.contains("soft cotton"), "later non-empty blurb must win: {props}");
+        assert!(
+            props.contains("soft cotton"),
+            "later non-empty blurb must win: {props}"
+        );
     }
 
     /// remove_node drops the node AND every edge touching it, and renumbers the

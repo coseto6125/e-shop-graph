@@ -87,7 +87,11 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale, origi
     // fallback for arrays that omit a numeric id; name is last resort.
     let id = p
         .get("id")
-        .and_then(|v| v.as_i64().map(|n| n.to_string()).or_else(|| v.as_str().map(str::to_string)))
+        .and_then(|v| {
+            v.as_i64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(str::to_string))
+        })
         .filter(|s| !s.is_empty())
         .or_else(|| p.get("handle").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| name.to_string());

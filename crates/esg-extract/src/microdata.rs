@@ -68,10 +68,15 @@ static PRODUCT_ID_ATTR_SEL: LazyLock<Selector> =
 fn page_product_id(doc: &Html) -> Option<String> {
     if let Some(el) = doc.select(&ADDTOCART_SEL).next() {
         if let Some(raw) = el.value().attr("data-addtocart") {
-            if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(raw) {
+            if let Ok(serde_json::Value::Object(obj)) =
+                serde_json::from_str::<serde_json::Value>(raw)
+            {
                 if let Some(id) = obj.get("id") {
                     // `id` is usually a JSON number; render it without quotes/decimals.
-                    let s = id.as_i64().map(|n| n.to_string()).or_else(|| id.as_str().map(str::to_string));
+                    let s = id
+                        .as_i64()
+                        .map(|n| n.to_string())
+                        .or_else(|| id.as_str().map(str::to_string));
                     if let Some(s) = s {
                         if !s.is_empty() {
                             return Some(s);
@@ -253,7 +258,11 @@ pub fn ingest_microdata(
         // one), so it dedups a product that the url alone wouldn't when the two
         // views' urls differ (collection-scoped vs bare). url is the portable
         // fallback for stores that don't expose an id; name is last resort.
-        let id = p.product_id.as_deref().or(p.url.as_deref()).unwrap_or(&p.name);
+        let id = p
+            .product_id
+            .as_deref()
+            .or(p.url.as_deref())
+            .unwrap_or(&p.name);
         let mut props = serde_json::Map::new();
         if let Some(ref pid) = p.product_id {
             props.insert("product_id".into(), pid.clone().into());
