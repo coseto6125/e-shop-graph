@@ -5,15 +5,15 @@
 //! 1. **Unit detection** — purely numeric, zero text dependency, globally
 //!    portable. The JSON may ship a price as whole units (`790`) or minor units
 //!    /cents (`79000`); we infer which by dividing against numbers the page
-//!    actually renders. We NEVER key off locale words like "元"/"NT$" — those
-//!    are region-specific and ambiguous. The anchor for "this is a displayed
-//!    price" is the number's *format* (a decimal-formatted amount), not a
-//!    currency symbol.
+//!    actually renders. Unit detection never keys off currency words — the
+//!    anchor for "this is a displayed price" is the number's *format* (a
+//!    decimal-formatted amount), not a currency symbol.
 //!
 //! 2. **Currency detection** — best-effort, only from UNAMBIGUOUS signals (an
-//!    ISO 4217 code, or a symbol that maps to exactly one currency). Ambiguous
-//!    symbols ($, ¥, 元) are left undetermined for an upstream caller to set;
-//!    the number itself carries no currency, so we don't guess.
+//!    ISO 4217 code, or a symbol/notation that maps to exactly one currency,
+//!    e.g. the Taiwan-specific `NT$` → TWD). Bare ambiguous symbols ($, ¥, 元)
+//!    are left undetermined for an upstream caller to set; the number itself
+//!    carries no currency, so we don't guess.
 //!
 //! The output is a single `Decimal`-backed `price` field — what the source
 //! displays to a human, with currency-aware precision:
@@ -53,12 +53,22 @@ fn is_zero_decimal(currency: &str) -> bool {
 /// `confident` is `score >= 2`. `price`/`currency` may still be filled at lower
 /// scores (best-effort, flagged) so downstream can choose to trust or skip.
 ///
-/// `price` is the human-readable amount as a string (zero-cent trailing strip,
-/// see module docs). The verdict ships ONE price representation — no parallel
-/// `cents` integer to drift out of sync with `display`, and no `f64` rounding.
+/// The verdict ships TWO views of the SAME amount, derived from one `whole`
+/// `Decimal` so they can never drift:
+///   * `price` — the human-readable amount as a string (zero-cent trailing
+///     strip, see module docs). This is the value consumers display / use.
+///   * `cents` — the same amount in the currency's MINOR units as an integer
+///     (TWD 690 → 690, USD 4.20 → 420), for inspection / debugging. Computed
+///     as `whole × 10^scale`; never stored independently of `price`.
+///
+/// `scale` is the currency's minor-unit exponent (0 for zero-decimal
+/// currencies like TWD/JPY, else 2) — the bridge between the two views. `f64`
+/// is never used (it rounded `690.00 × 100` to `68999.999…` before).
 #[derive(Debug, Clone, PartialEq)]
 pub struct PriceVerdict {
     pub price: String,
+    pub cents: i64,
+    pub scale: u8,
     pub currency: &'static str,
     pub score: i32,
 }
@@ -66,6 +76,34 @@ pub struct PriceVerdict {
 impl PriceVerdict {
     pub fn confident(&self) -> bool {
         self.score >= 2
+    }
+
+    /// Write every price prop this verdict carries into a props map — the ONE
+    /// place that decides which keys a priced Product/Variant node gets, so
+    /// the four extractors (platform_json / next_data / microdata / dom_attr)
+    /// can never drift apart on the set. `currency` is omitted when empty
+    /// (ambiguous symbol, no ISO code) rather than written as `""`, matching
+    /// the prior per-extractor behaviour.
+    pub fn write_into(&self, map: &mut serde_json::Map<String, Value>) {
+        map.insert("price".into(), Value::String(self.price.clone()));
+        map.insert("price_cents".into(), Value::Number(self.cents.into()));
+        map.insert("price_scale".into(), Value::Number(self.scale.into()));
+        if !self.currency.is_empty() {
+            map.insert("currency".into(), Value::String(self.currency.to_string()));
+        }
+        map.insert("price_confident".into(), Value::Bool(self.confident()));
+        map.insert("price_score".into(), Value::Number(self.score.into()));
+    }
+}
+
+/// Minor-unit exponent for a currency: 0 for zero-decimal currencies (the
+/// whole-unit value already IS the minor-unit value), else 2. Mirrors the
+/// branch in `format_price` so the two stay consistent.
+fn minor_unit_scale(currency: &str) -> u8 {
+    if is_zero_decimal(currency) {
+        0
+    } else {
+        2
     }
 }
 
@@ -203,8 +241,20 @@ impl PriceScale {
 
         // Fallback: no corroboration → whole-units assumption, score stays low.
         let whole = whole.unwrap_or(n);
+        // Both views come from `whole`: the display string and the minor-unit
+        // integer. `cents = whole × 10^scale`, computed in Decimal then rounded
+        // to i64 — never via f64. On overflow (a magnitude no real price hits)
+        // fall back to 0 cents rather than panic; `price`/`score` still stand.
+        let scale = minor_unit_scale(self.currency);
+        let cents = whole
+            .checked_mul(Decimal::from(10u64.pow(scale as u32)))
+            .map(|c| c.round())
+            .and_then(|c| c.to_i64())
+            .unwrap_or(0);
         Some(PriceVerdict {
             price: format_price(whole, self.currency),
+            cents,
+            scale,
             currency: self.currency,
             score,
         })
@@ -459,7 +509,11 @@ fn detect_currency(html: &str) -> &'static str {
             return code;
         }
     }
-    // 2. unambiguous symbols only
+    // 2. unambiguous symbols only. `NT$` is Taiwan-specific notation (the bare
+    //    `$` is ambiguous, but the `NT` prefix pins it to TWD) — check it before
+    //    the bare-symbol fallthrough so a TWD shop with no ISO code (the common
+    //    easy.co / cyberbiz case) gets the right zero-decimal scale instead of
+    //    being treated as a 2-decimal currency (which would 100× its cents).
     if html.contains('€') {
         "EUR"
     } else if html.contains('£') {
@@ -470,8 +524,10 @@ fn detect_currency(html: &str) -> &'static str {
         "INR"
     } else if html.contains('₩') {
         "KRW"
+    } else if html.contains("NT$") || html.contains("NT＄") {
+        "TWD"
     } else {
-        "" // $, ¥, 元 etc. are ambiguous → leave for upstream to set
+        "" // bare $, ¥, 元 etc. are ambiguous → leave for upstream to set
     }
 }
 
@@ -532,16 +588,17 @@ mod tests {
 
     /// Anchor = number adjacent to a currency symbol, decimals or not. Mirrors
     /// doni (product.price=790 whole, variant.price=79000 cents coexisting).
-    /// `currency=""` here (ambiguous `NT$`) means we format as a 2-dp currency;
-    /// 790 → "790" (trailing .00 stripped).
+    /// `NT$` pins the currency to TWD (zero-decimal), so 790 → price "790",
+    /// cents 790, scale 0 — NOT the 79000 a 2-decimal default would give.
     #[test]
     fn unit_detect_currency_adjacent_decimal() {
         let scale = PriceScale::from_html("<span>NT$ 790.00</span> ... 590.00 ...");
         let v = scale.verdict(Some(&json!(790)), None).unwrap();
-        assert_eq!((v.price.as_str(), v.confident()), ("790", true));
+        assert_eq!((v.price.as_str(), v.cents, v.scale, v.currency), ("790", 790, 0, "TWD"));
+        assert!(v.confident());
         let v2 = scale.verdict(Some(&json!(79000)), None).unwrap();
         // 79000 looks like cents against the visible 790 anchor → 790 whole.
-        assert_eq!((v2.price.as_str(), v2.confident()), ("790", true));
+        assert_eq!((v2.price.as_str(), v2.cents, v2.confident()), ("790", 790, true));
     }
 
     /// Integer-price locales render no decimals. The display string drops the
@@ -604,6 +661,37 @@ mod tests {
         assert_eq!(v.price, "4.20");
     }
 
+    /// `cents`/`scale` are the minor-unit view of the SAME amount as `price`.
+    /// Zero-decimal currency (TWD): scale 0, cents == whole units (690).
+    /// Two-decimal currency (USD): scale 2, cents == whole × 100 (420).
+    /// Both derive from one Decimal, so `cents` can never disagree with the
+    /// displayed `price`.
+    #[test]
+    fn cents_and_scale_mirror_the_display_amount() {
+        let twd = PriceScale::from_html(r#"NT$ 690 {"priceCurrency":"TWD"}"#);
+        let v = twd.verdict(Some(&json!(690.00)), None).unwrap();
+        assert_eq!((v.price.as_str(), v.cents, v.scale), ("690", 690, 0));
+
+        let usd = PriceScale::from_html(r#"price 4.20 {"currency":"USD"} shown"#);
+        let u = usd.verdict(Some(&json!(4.20)), None).unwrap();
+        assert_eq!((u.price.as_str(), u.cents, u.scale), ("4.20", 420, 2));
+
+        // A whole-dollar USD amount: price strips to "4", cents is 400.
+        let usd2 = PriceScale::from_html(r#"price 4.00 {"currency":"USD"} shown"#);
+        let u2 = usd2.verdict(Some(&json!(4.00)), None).unwrap();
+        assert_eq!((u2.price.as_str(), u2.cents, u2.scale), ("4", 400, 2));
+    }
+
+    /// JSON-cents input (variant ships 79000 while page shows 790) is divided
+    /// back to whole units; `cents` then reflects the WHOLE amount in minor
+    /// units (TWD scale 0 → 790), not the raw JSON 79000.
+    #[test]
+    fn cents_reflects_normalized_whole_not_raw_json() {
+        let scale = PriceScale::from_html(r#"NT$ 790 {"priceCurrency":"TWD"}"#);
+        let v = scale.verdict(Some(&json!(79000)), None).unwrap();
+        assert_eq!((v.price.as_str(), v.cents, v.scale), ("790", 790, 0));
+    }
+
     /// "Too common" numbers (years, tiny counts) must not become anchors.
     #[test]
     fn excludes_common_non_price_numbers() {
@@ -628,11 +716,25 @@ mod tests {
         assert!(!scale.unit_set.contains(&1200));
     }
 
-    /// Ambiguous symbols ($, 元) must NOT set a currency.
+    /// Bare ambiguous symbols (lone `$`, `元`) must NOT set a currency — `$`
+    /// maps to USD/TWD/HKD/SGD/…, `元` to CNY/TWD/JPY. (Note: the `NT`-prefixed
+    /// `NT$` IS unambiguous and is handled separately — see `nt_dollar_is_twd`.)
     #[test]
     fn ambiguous_symbol_leaves_currency_empty() {
-        let html = "NT$ 790.00 售價 590.00 元";
+        let html = "價格 $ 790.00 售價 590.00 元";
         assert_eq!(PriceScale::from_html(html).currency, "");
+    }
+
+    /// `NT$` is Taiwan-specific notation → TWD (zero-decimal). A TWD shop that
+    /// only renders `NT$` with no ISO code (the common easy.co case) must get
+    /// scale 0 so its `price_cents` is the whole value, not 100×. Regression
+    /// for the doni carousel where `currency=None` 100×'d every price_cents.
+    #[test]
+    fn nt_dollar_is_twd() {
+        let scale = PriceScale::from_html("<span>NT$ 990</span>");
+        assert_eq!(scale.currency, "TWD");
+        let v = scale.verdict(Some(&json!(990)), None).unwrap();
+        assert_eq!((v.price.as_str(), v.cents, v.scale, v.currency), ("990", 990, 0, "TWD"));
     }
 
     /// An explicit ISO code is trusted.

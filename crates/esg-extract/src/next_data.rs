@@ -103,15 +103,7 @@ fn props_with_price(
         .find_map(|k| obj.get(*k));
     let mut map = obj.clone();
     if let Some(v) = scale.verdict(price_field, None) {
-        let confident = v.confident();
-        let score = v.score;
-        let currency = v.currency;
-        map.insert("price".into(), Value::String(v.price));
-        if !currency.is_empty() {
-            map.insert("currency".into(), currency.into());
-        }
-        map.insert("price_confident".into(), confident.into());
-        map.insert("price_score".into(), score.into());
+        v.write_into(&mut map);
     }
     Value::Object(map).to_string()
 }

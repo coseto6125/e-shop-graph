@@ -4,7 +4,8 @@
 //! caller's concern, mirroring the Rust CLI.
 
 use esg_core::cypher::{self, Value};
-use esg_core::store::{save, LoadedGraph};
+use esg_core::store::{load_owned, save, LoadedGraph};
+use esg_core::GraphBuilder;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -52,6 +53,50 @@ fn build_graph_from_dir(
         let builder = esg_extract::build_from_files(&paths).map_err(err)?;
         let bytes = write_graph(&builder.build(), &out)?;
         Ok((paths.len(), bytes))
+    })
+}
+
+/// INCREMENTAL rebuild: fold a small batch of re-crawled `pages` into the
+/// graph at `existing_path`, drop the products at `removed_urls`, and write the
+/// result to `out_path` (atomic). Returns the byte size written.
+///
+/// This is what lets a store's graph stay current WITHOUT re-crawling every
+/// page: a change-detector (sitemap `lastmod` / content hash) feeds only the
+/// handful of changed product pages here, plus the URLs of any that went
+/// off-sale. A re-crawled product `upsert`s — its price/name overwrite in
+/// place rather than duplicating. `removed_urls` are matched against each
+/// product's `url` prop (the identity a caller actually holds — the internal
+/// node id is a source-dependent handle/sku the caller never sees).
+///
+/// When `existing_path` is absent or empty, this behaves like a fresh
+/// `build_graph` from `pages` — so the caller needs no first-run/incremental
+/// branch. `existing_path` and `out_path` MAY be the same file (the load
+/// fully deserializes into memory before the atomic rewrite).
+#[pyfunction]
+fn merge_graph(
+    py: Python<'_>,
+    existing_path: &str,
+    pages: Vec<String>,
+    removed_urls: Vec<String>,
+    out_path: &str,
+) -> PyResult<usize> {
+    let existing = PathBuf::from(existing_path);
+    let out = PathBuf::from(out_path);
+    py.allow_threads(|| {
+        // Rehydrate from the existing graph when present; else start empty so a
+        // first run is just a build. A missing file is the empty case, but a
+        // present-but-corrupt file is a real error (don't silently discard a
+        // graph the caller believes exists).
+        let mut builder = if existing.is_file() {
+            GraphBuilder::from_graph(&load_owned(&existing).map_err(err)?)
+        } else {
+            GraphBuilder::new()
+        };
+        esg_extract::ingest_pages_into(&mut builder, &pages);
+        for url in &removed_urls {
+            builder.remove_node_by_url(url);
+        }
+        write_graph(&builder.build(), &out)
     })
 }
 
@@ -110,6 +155,7 @@ fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
 fn esg(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(build_graph, m)?)?;
     m.add_function(wrap_pyfunction!(build_graph_from_dir, m)?)?;
+    m.add_function(wrap_pyfunction!(merge_graph, m)?)?;
     m.add_function(wrap_pyfunction!(query, m)?)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())

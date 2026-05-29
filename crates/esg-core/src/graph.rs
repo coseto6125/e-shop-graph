@@ -71,12 +71,15 @@ pub struct Graph {
 }
 
 pub const MAGIC: [u8; 4] = *b"ESG1";
-/// Bumped 2→3 for the schema expansion: Review/Person/Organization/Category
-/// nodes and the new BroaderCategory edge are now emitted. rkyv discriminants
-/// stayed stable (new variants appended at the end), so the bump is a semantic
-/// signal for consumers — a v3 graph with no Review nodes means the page had
-/// none, vs a v2 graph where the extractor simply never produced them.
-pub const VERSION: u32 = 3;
+/// 2→3: schema expansion (Review/Person/Organization/Category nodes + the
+///   BroaderCategory edge).
+/// 3→4 (0.7.0): price props gained `price_cents` (i64 minor units) +
+///   `price_scale` alongside the display `price` string. The rkyv layout is
+///   unchanged (props is still an opaque JSON `Str`), so a v3 graph would load
+///   without crashing — but its Product nodes lack the new keys, so Cypher on
+///   `p.price_cents` would silently return null. The bump forces those graphs
+///   to be rebuilt so the structured price view is actually present.
+pub const VERSION: u32 = 4;
 
 impl Graph {
     /// Resolve a `Str` slice against the pool. Panics on out-of-bounds — a

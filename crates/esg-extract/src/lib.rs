@@ -169,13 +169,23 @@ fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::Pr
 /// batches where holding all HTML in memory is fine. Borrows the pages — it
 /// only reads them, so callers keep ownership.
 pub fn build_from_pages(pages: &[String]) -> Result<GraphBuilder> {
+    let mut builder = GraphBuilder::new();
+    ingest_pages_into(&mut builder, pages);
+    Ok(builder)
+}
+
+/// Extract `pages` and fold them into an EXISTING builder — the extraction half
+/// of incremental rebuild. A builder rehydrated via `GraphBuilder::from_graph`
+/// can take a handful of re-crawled pages here; each product `upsert_node`s,
+/// so a changed price overwrites in place rather than duplicating. Extraction
+/// is parallel (rayon); the ingest fold is serial because the builder is one
+/// shared mutable structure.
+pub fn ingest_pages_into(builder: &mut GraphBuilder, pages: &[String]) {
     let per_page: Vec<(PageExtract, price::PriceScale)> =
         pages.par_iter().map(|html| extract_page(html)).collect();
-    let mut builder = GraphBuilder::new();
     for (page, scale) in &per_page {
-        ingest_into(&mut builder, page, scale);
+        ingest_into(builder, page, scale);
     }
-    Ok(builder)
 }
 
 /// Memory-bounded build: mmap each HTML file in `paths` one at a time, extract,

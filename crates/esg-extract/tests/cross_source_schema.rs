@@ -1,6 +1,7 @@
 //! Cross-source schema parity: every product extraction path must surface
-//! the same Product props (`name`, `price_cents`, `currency`,
-//! `price_confident`, `price_score`) when the page carries that signal.
+//! the same Product props (`name`, `price`, `price_cents`, `price_scale`,
+//! `currency`, `price_confident`, `price_score`) when the page carries that
+//! signal.
 //!
 //! Regression-driven by the 0.2.0 finding that JSON-LD ingest skipped
 //! `PriceScale::verdict` entirely — JSON-LD Product nodes were missing
@@ -147,6 +148,28 @@ fn price_present_across_sources() {
             matches!(&rows[0][0], Value::Str(s) if !s.is_empty()),
             "[{label}] Product.price missing or non-string — schema parity broken: {:?}",
             rows[0][0],
+        );
+    }
+}
+
+#[test]
+fn price_cents_and_scale_present_across_sources() {
+    // 0.7.0: alongside the display `price` string, every source must surface
+    // the minor-unit integer `price_cents` and its `price_scale`, derived from
+    // the SAME Decimal. The fixture is 4200 TWD (zero-decimal) so all three
+    // sources must agree: cents == 4200, scale == 0.
+    for (label, html) in [
+        ("jsonld", JSONLD_HTML),
+        ("microdata", MICRODATA_HTML),
+        ("platform", PLATFORM_HTML),
+    ] {
+        let rows = cypher_rows(html, "MATCH (p:Product) RETURN p.price_cents, p.price_scale");
+        assert_eq!(rows.len(), 1, "[{label}] one product expected");
+        assert_eq!(
+            (&rows[0][0], &rows[0][1]),
+            (&Value::Int(4200), &Value::Int(0)),
+            "[{label}] price_cents/price_scale parity broken: {:?}",
+            rows[0],
         );
     }
 }

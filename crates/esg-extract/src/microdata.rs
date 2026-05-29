@@ -40,6 +40,48 @@ pub fn extract_microdata_products(html: &str) -> Vec<MicrodataProduct> {
     extract_from_dom(&Html::parse_document(html))
 }
 
+/// Resolve a possibly-relative URL against the page's canonical origin.
+///
+/// A listing card's `<a itemprop="url" href="/products/foo">` carries a
+/// root-relative path, while the same product's `og:url` (and other cards)
+/// carry the absolute form. Stored verbatim, the two strings become two
+/// distinct node ids for one product — the duplicate-node bug that also leaks
+/// a relative `/products/...` into a LINE carousel `uri`, which 400s the whole
+/// message. Absolutizing against the page's own `og:url` origin collapses both
+/// to one id (dedup) and guarantees every carousel link is a full URL.
+///
+/// `base` is the page's `og:url` (always absolute). We only need its origin —
+/// `scheme://host[:port]` — which is everything up to the path. Handles the two
+/// relative forms storefronts emit; anything already absolute (`http`) passes
+/// through untouched, so multi-origin graphs never cross-attribute (each page
+/// absolutizes against its own origin, an `a.com` page never borrows `b.com`).
+fn absolutize(value: &str, base: Option<&str>) -> String {
+    if value.starts_with("http") {
+        return value.to_string();
+    }
+    let Some(base) = base else {
+        return value.to_string();
+    };
+    // protocol-relative: `//cdn.x.com/img.jpg` → borrow the page's scheme only.
+    if let Some(rest) = value.strip_prefix("//") {
+        let scheme = base.split("://").next().unwrap_or("https");
+        return format!("{scheme}://{rest}");
+    }
+    // root-relative: `/products/foo` → prepend the page's `scheme://host[:port]`.
+    // Origin = base up to the first `/` after the `scheme://` marker.
+    if value.starts_with('/') {
+        if let Some((scheme, after)) = base.split_once("://") {
+            let host = after.split('/').next().unwrap_or("");
+            if !host.is_empty() {
+                return format!("{scheme}://{host}{value}");
+            }
+        }
+    }
+    // No usable origin or an unrecognised relative form — leave as-is rather
+    // than fabricate a wrong URL.
+    value.to_string()
+}
+
 /// Extract from an already-parsed DOM so a caller that parsed the page once
 /// (e.g. the JSON-LD fallback on the same page) can reuse it.
 ///
@@ -69,16 +111,24 @@ pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
         .select(&PRODUCT_SCOPE_SEL)
         .filter_map(|scope| {
             let name = scope.select(&NAME_SEL).find_map(itemprop_value)?;
+            let base = page_url.as_deref();
             Some(MicrodataProduct {
                 name,
                 price: scope.select(&PRICE_SEL).find_map(itemprop_value),
                 currency: scope.select(&CURRENCY_SEL).find_map(itemprop_value),
-                image: scope.select(&IMAGE_SEL).find_map(itemprop_value),
+                image: scope
+                    .select(&IMAGE_SEL)
+                    .find_map(itemprop_value)
+                    .map(|img| absolutize(&img, base)),
                 // Per-card product URL (`itemprop=url`) so each listed product
                 // has a distinct id; fall back to the page's canonical og:url.
+                // A card's `href` is often root-relative (`/products/foo`) —
+                // absolutize against the page origin so it dedups against the
+                // absolute form instead of forking a second node.
                 url: scope
                     .select(&URL_SEL)
                     .find_map(itemprop_value)
+                    .map(|u| absolutize(&u, base))
                     .or_else(|| page_url.clone()),
             })
         })
@@ -92,11 +142,15 @@ pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
     let Some(name) = doc.select(&NAME_SEL).find_map(itemprop_value) else {
         return Vec::new();
     };
+    let base = page_url.as_deref();
     vec![MicrodataProduct {
         name,
         price: doc.select(&PRICE_SEL).find_map(itemprop_value),
         currency: doc.select(&CURRENCY_SEL).find_map(itemprop_value),
-        image: doc.select(&IMAGE_SEL).find_map(itemprop_value),
+        image: doc
+            .select(&IMAGE_SEL)
+            .find_map(itemprop_value)
+            .map(|img| absolutize(&img, base)),
         url: page_url,
     }]
 }
@@ -148,15 +202,7 @@ pub fn ingest_microdata(
             .as_ref()
             .map(|s| serde_json::Value::String(s.clone()));
         if let Some(v) = scale.verdict(price_value.as_ref(), None) {
-            let confident = v.confident();
-            let score = v.score;
-            let currency = v.currency;
-            props.insert("price".into(), serde_json::Value::String(v.price));
-            if !currency.is_empty() {
-                props.insert("currency".into(), currency.into());
-            }
-            props.insert("price_confident".into(), confident.into());
-            props.insert("price_score".into(), score.into());
+            v.write_into(&mut props);
         }
         // itemprop priceCurrency is an explicit signal; prefer it when present.
         if let Some(ref cur) = p.currency {
