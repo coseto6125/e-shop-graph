@@ -79,7 +79,10 @@ pub const MAGIC: [u8; 4] = *b"ESG1";
 ///   without crashing — but its Product nodes lack the new keys, so Cypher on
 ///   `p.price_cents` would silently return null. The bump forces those graphs
 ///   to be rebuilt so the structured price view is actually present.
-pub const VERSION: u32 = 4;
+/// 4→5 (0.7.1): microdata extractor surfaces `Product.description` (og:description,
+///   single-product pages only). Same opaque-JSON-props story as 3→4 — old graphs
+///   load but lack the key, so the bump forces a rebuild to populate it.
+pub const VERSION: u32 = 5;
 
 impl Graph {
     /// Resolve a `Str` slice against the pool. Panics on out-of-bounds — a

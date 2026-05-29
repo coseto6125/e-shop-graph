@@ -161,6 +161,55 @@ fn absolute_card_url_passes_through_unchanged() {
 }
 
 #[test]
+fn single_product_page_captures_og_description() {
+    // A product detail page (one Product itemscope) — og:description is THIS
+    // product's marketing copy and becomes a carousel subtitle.
+    const HTML: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://shop.example/products/dress">
+<meta property="og:description" content="貼身魚尾剪裁，腿型瞬間拉長，有內杯可單穿。">
+</head><body>
+<div itemscope itemtype="https://schema.org/Product">
+  <h1 itemprop="name">Mermaid Dress</h1>
+</div>
+</body></html>"#;
+    let rows = cypher_rows(HTML, "MATCH (p:Product) RETURN p.description");
+    assert_eq!(rows.len(), 1);
+    assert!(
+        matches!(&rows[0][0], Value::Str(s) if s == "貼身魚尾剪裁，腿型瞬間拉長，有內杯可單穿。"),
+        "single-product page should capture og:description, got {:?}",
+        rows[0][0]
+    );
+}
+
+#[test]
+fn listing_page_does_not_attach_page_description() {
+    // Two products on one page → og:description is the collection blurb, not
+    // any single card's. Attaching it to either would mislabel — must stay null.
+    const HTML: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://shop.example/collections/dress">
+<meta property="og:description" content="本系列洋裝春夏新品總覽">
+</head><body>
+<div itemscope itemtype="https://schema.org/Product">
+  <h1 itemprop="name">Dress A</h1>
+  <a itemprop="url" href="/products/a">a</a>
+</div>
+<div itemscope itemtype="https://schema.org/Product">
+  <h1 itemprop="name">Dress B</h1>
+  <a itemprop="url" href="/products/b">b</a>
+</div>
+</body></html>"#;
+    let rows = cypher_rows(HTML, "MATCH (p:Product) RETURN p.description");
+    assert_eq!(rows.len(), 2, "two product cards");
+    for r in &rows {
+        assert!(
+            matches!(&r[0], Value::Null),
+            "listing-page card must NOT borrow the collection og:description, got {:?}",
+            r[0]
+        );
+    }
+}
+
+#[test]
 fn img_itemprop_uses_src_attr() {
     // `<img itemprop="image" src="...">` is the canonical schema.org carrier
     // for image — `src` is implicit on `<img>`. The reader must honour it
