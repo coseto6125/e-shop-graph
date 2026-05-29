@@ -324,9 +324,21 @@ fn empty_backtick_errors() {
 /// non-numeric string, for identity / cross-type comparison tests.
 fn identity_graph_bytes() -> Vec<u8> {
     let mut b = GraphBuilder::new();
-    b.upsert_node(NodeKind::Product, "a", "A", r#"{"sku":"0123","color":"red"}"#);
-    b.upsert_node(NodeKind::Product, "b", "B", r#"{"sku":"456","color":"blue"}"#);
-    rkyv::to_bytes::<rkyv::rancor::Error>(&b.build()).unwrap().to_vec()
+    b.upsert_node(
+        NodeKind::Product,
+        "a",
+        "A",
+        r#"{"sku":"0123","color":"red"}"#,
+    );
+    b.upsert_node(
+        NodeKind::Product,
+        "b",
+        "B",
+        r#"{"sku":"456","color":"blue"}"#,
+    );
+    rkyv::to_bytes::<rkyv::rancor::Error>(&b.build())
+        .unwrap()
+        .to_vec()
 }
 
 /// Regression: a leading-zero SKU string ("0123") was coerced to Int(123),
@@ -335,7 +347,10 @@ fn identity_graph_bytes() -> Vec<u8> {
 #[test]
 fn leading_zero_sku_keeps_string_identity() {
     let bytes = identity_graph_bytes();
-    let rows = run(&bytes, r#"MATCH (p:Product) WHERE p.sku = "0123" RETURN p.sku"#);
+    let rows = run(
+        &bytes,
+        r#"MATCH (p:Product) WHERE p.sku = "0123" RETURN p.sku"#,
+    );
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0][0], Value::Str("0123".into()));
 }
@@ -355,6 +370,9 @@ fn ne_across_types_is_true() {
 #[test]
 fn ne_against_missing_property_is_false() {
     let bytes = identity_graph_bytes();
-    let rows = run(&bytes, "MATCH (p:Product) WHERE p.nonexistent <> 5 RETURN p.name");
+    let rows = run(
+        &bytes,
+        "MATCH (p:Product) WHERE p.nonexistent <> 5 RETURN p.name",
+    );
     assert!(rows.is_empty());
 }

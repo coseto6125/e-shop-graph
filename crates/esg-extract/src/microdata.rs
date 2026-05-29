@@ -33,8 +33,7 @@ static OG_URL_SEL: LazyLock<Selector> =
 // product's price binding to another's name.
 static PRODUCT_SCOPE_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("[itemscope][itemtype*='Product']").unwrap());
-static URL_SEL: LazyLock<Selector> =
-    LazyLock::new(|| Selector::parse("[itemprop='url']").unwrap());
+static URL_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("[itemprop='url']").unwrap());
 
 pub fn extract_microdata_products(html: &str) -> Vec<MicrodataProduct> {
     extract_from_dom(&Html::parse_document(html))

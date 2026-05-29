@@ -163,7 +163,10 @@ fn price_cents_and_scale_present_across_sources() {
         ("microdata", MICRODATA_HTML),
         ("platform", PLATFORM_HTML),
     ] {
-        let rows = cypher_rows(html, "MATCH (p:Product) RETURN p.price_cents, p.price_scale");
+        let rows = cypher_rows(
+            html,
+            "MATCH (p:Product) RETURN p.price_cents, p.price_scale",
+        );
         assert_eq!(rows.len(), 1, "[{label}] one product expected");
         assert_eq!(
             (&rows[0][0], &rows[0][1]),

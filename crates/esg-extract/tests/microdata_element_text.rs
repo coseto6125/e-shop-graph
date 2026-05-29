@@ -114,7 +114,11 @@ const LISTING_RELATIVE_HREF: &str = r#"<!doctype html><html><head>
 #[test]
 fn relative_card_url_absolutized_against_page_origin() {
     let rows = cypher_rows(LISTING_RELATIVE_HREF, "MATCH (p:Product) RETURN p.url");
-    assert_eq!(rows.len(), 1, "one product node, not forked relative+absolute");
+    assert_eq!(
+        rows.len(),
+        1,
+        "one product node, not forked relative+absolute"
+    );
     assert!(
         matches!(&rows[0][0], Value::Str(s) if s == "https://shop.example/products/mermaid-dress"),
         "root-relative card href should be absolutized to the page origin, got {:?}",

@@ -26,7 +26,10 @@ fn reintern(s: &str, pool: &mut Vec<u8>, seen: &mut HashMap<String, Str>) -> Str
     }
     let off = pool.len() as u32;
     pool.extend_from_slice(s.as_bytes());
-    let slice = Str { off, len: s.len() as u32 };
+    let slice = Str {
+        off,
+        len: s.len() as u32,
+    };
     seen.insert(s.to_string(), slice);
     slice
 }
@@ -65,7 +68,12 @@ impl GraphBuilder {
         let mut b = Self::new();
         // Pass 1: intern every node so edge targets resolve by id in build().
         for node in &graph.nodes {
-            b.upsert_node(node.kind, graph.str(&node.id), graph.str(&node.name), graph.str(&node.props));
+            b.upsert_node(
+                node.kind,
+                graph.str(&node.id),
+                graph.str(&node.name),
+                graph.str(&node.props),
+            );
         }
         // Pass 2: replay forward edges as (src_idx, rel, dst_id). src_idx is the
         // dense index we just assigned (node order is preserved in pass 1), and
@@ -191,8 +199,10 @@ impl GraphBuilder {
         let mut old_to_new: Vec<Option<u32>> = vec![None; nodes.len()];
         let mut next = 0u32;
         for (old_idx, node) in nodes.iter().enumerate() {
-            let id = std::str::from_utf8(&pool[node.id.off as usize..(node.id.off + node.id.len) as usize])
-                .expect("string_pool utf8");
+            let id = std::str::from_utf8(
+                &pool[node.id.off as usize..(node.id.off + node.id.len) as usize],
+            )
+            .expect("string_pool utf8");
             if !removed.contains(id) {
                 old_to_new[old_idx] = Some(next);
                 next += 1;
@@ -205,7 +215,8 @@ impl GraphBuilder {
         let mut new_pool: Vec<u8> = Vec::with_capacity(pool.len());
         let mut new_intern: HashMap<String, Str> = HashMap::new();
         let str_of = |st: &Str| -> &str {
-            std::str::from_utf8(&pool[st.off as usize..(st.off + st.len) as usize]).expect("string_pool utf8")
+            std::str::from_utf8(&pool[st.off as usize..(st.off + st.len) as usize])
+                .expect("string_pool utf8")
         };
         let mut new_nodes: Vec<Node> = Vec::with_capacity(n);
         for (old_idx, node) in nodes.iter().enumerate() {
@@ -215,7 +226,12 @@ impl GraphBuilder {
             let id = reintern(str_of(&node.id), &mut new_pool, &mut new_intern);
             let name = reintern(str_of(&node.name), &mut new_pool, &mut new_intern);
             let props = reintern(str_of(&node.props), &mut new_pool, &mut new_intern);
-            new_nodes.push(Node { kind: node.kind, id, name, props });
+            new_nodes.push(Node {
+                kind: node.kind,
+                id,
+                name,
+                props,
+            });
         }
 
         // 3. Bucket edges per source (forward) and per target (reverse) in one
@@ -289,7 +305,10 @@ mod tests {
         assert_eq!(g.nodes.len(), 1);
         let (idx2, props) = node(&g, "p1").unwrap();
         assert_eq!(idx2, idx1);
-        assert!(props.contains("590"), "props should be overwritten: {props}");
+        assert!(
+            props.contains("590"),
+            "props should be overwritten: {props}"
+        );
         assert!(!props.contains("690"), "stale price must be gone: {props}");
     }
 
@@ -382,8 +401,18 @@ mod tests {
     fn remove_node_by_url_matches_props_url() {
         let mut b = GraphBuilder::new();
         // id = handle "h1", but the caller only knows the url.
-        b.upsert_node(NodeKind::Product, "h1", "Tee", r#"{"url":"/products/tee","price":"690"}"#);
-        b.upsert_node(NodeKind::Product, "h2", "Cap", r#"{"url":"/products/cap","price":"300"}"#);
+        b.upsert_node(
+            NodeKind::Product,
+            "h1",
+            "Tee",
+            r#"{"url":"/products/tee","price":"690"}"#,
+        );
+        b.upsert_node(
+            NodeKind::Product,
+            "h2",
+            "Cap",
+            r#"{"url":"/products/cap","price":"300"}"#,
+        );
         assert!(b.remove_node_by_url("/products/tee"));
         assert!(!b.remove_node_by_url("/products/nope")); // no match → false
         let g = b.build();

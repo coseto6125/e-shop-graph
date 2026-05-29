@@ -74,7 +74,11 @@ impl LoadedGraph {
 /// a 32-bit `off + len` cannot wrap into a falsely-in-bounds value.
 fn validate_invariants(g: &ArchivedGraph) -> Result<()> {
     if g.magic != MAGIC {
-        bail!("graph.bin magic mismatch: got {:?}, expected {:?}", g.magic, MAGIC);
+        bail!(
+            "graph.bin magic mismatch: got {:?}, expected {:?}",
+            g.magic,
+            MAGIC
+        );
     }
     if g.version.to_native() != VERSION {
         bail!(
@@ -129,7 +133,11 @@ fn validate_invariants(g: &ArchivedGraph) -> Result<()> {
     // Every node string (id/name/props) is an (off,len) slice into the pool;
     // an overrunning slice panics in `Graph::str` / `arch_str`.
     for (i, node) in g.nodes.iter().enumerate() {
-        for (s, which) in [(&node.id, "id"), (&node.name, "name"), (&node.props, "props")] {
+        for (s, which) in [
+            (&node.id, "id"),
+            (&node.name, "name"),
+            (&node.props, "props"),
+        ] {
             let end = s.off.to_native() as u64 + s.len.to_native() as u64;
             if end > pool_len {
                 bail!("node {i} {which} Str overruns string_pool ({end} > {pool_len})");

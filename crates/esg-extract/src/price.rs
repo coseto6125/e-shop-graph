@@ -483,7 +483,12 @@ fn whole_units(token: &str) -> Option<u64> {
     }
     let frac_len = token
         .rfind(['.', ','])
-        .map(|sep| token[sep + 1..].chars().filter(|c| c.is_ascii_digit()).count())
+        .map(|sep| {
+            token[sep + 1..]
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .count()
+        })
         .filter(|&n| n == 1 || n == 2) // 1–2 trailing digits = cents; 3 = grouping
         .unwrap_or(0);
     let whole_digits = &all_digits[..all_digits.len() - frac_len];
@@ -594,11 +599,17 @@ mod tests {
     fn unit_detect_currency_adjacent_decimal() {
         let scale = PriceScale::from_html("<span>NT$ 790.00</span> ... 590.00 ...");
         let v = scale.verdict(Some(&json!(790)), None).unwrap();
-        assert_eq!((v.price.as_str(), v.cents, v.scale, v.currency), ("790", 790, 0, "TWD"));
+        assert_eq!(
+            (v.price.as_str(), v.cents, v.scale, v.currency),
+            ("790", 790, 0, "TWD")
+        );
         assert!(v.confident());
         let v2 = scale.verdict(Some(&json!(79000)), None).unwrap();
         // 79000 looks like cents against the visible 790 anchor → 790 whole.
-        assert_eq!((v2.price.as_str(), v2.cents, v2.confident()), ("790", 790, true));
+        assert_eq!(
+            (v2.price.as_str(), v2.cents, v2.confident()),
+            ("790", 790, true)
+        );
     }
 
     /// Integer-price locales render no decimals. The display string drops the
@@ -734,7 +745,10 @@ mod tests {
         let scale = PriceScale::from_html("<span>NT$ 990</span>");
         assert_eq!(scale.currency, "TWD");
         let v = scale.verdict(Some(&json!(990)), None).unwrap();
-        assert_eq!((v.price.as_str(), v.cents, v.scale, v.currency), ("990", 990, 0, "TWD"));
+        assert_eq!(
+            (v.price.as_str(), v.cents, v.scale, v.currency),
+            ("990", 990, 0, "TWD")
+        );
     }
 
     /// An explicit ISO code is trusted.

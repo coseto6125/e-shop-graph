@@ -17,12 +17,28 @@ fn well_formed() -> Graph {
         version: VERSION,
         string_pool: b"ab".to_vec(),
         nodes: vec![
-            Node { kind: NodeKind::Product, id: s(0), name: s(0), props: s(0) },
-            Node { kind: NodeKind::Product, id: s(1), name: s(1), props: s(1) },
+            Node {
+                kind: NodeKind::Product,
+                id: s(0),
+                name: s(0),
+                props: s(0),
+            },
+            Node {
+                kind: NodeKind::Product,
+                id: s(1),
+                name: s(1),
+                props: s(1),
+            },
         ],
-        edges: vec![Edge { rel: RelType::Brand, dst: 1 }],
+        edges: vec![Edge {
+            rel: RelType::Brand,
+            dst: 1,
+        }],
         out_offsets: vec![0, 1, 1],
-        in_edges: vec![InEdge { rel: RelType::Brand, src: 0 }],
+        in_edges: vec![InEdge {
+            rel: RelType::Brand,
+            src: 0,
+        }],
         in_offsets: vec![0, 0, 1],
     }
 }
@@ -79,14 +95,20 @@ fn offsets_last_not_edge_count_rejected() {
 #[test]
 fn edge_dst_out_of_range_rejected() {
     let mut g = well_formed();
-    g.edges = vec![Edge { rel: RelType::Brand, dst: 99 }];
+    g.edges = vec![Edge {
+        rel: RelType::Brand,
+        dst: 99,
+    }];
     assert!(roundtrip(&g, "dst_oob").is_err());
 }
 
 #[test]
 fn in_edge_src_out_of_range_rejected() {
     let mut g = well_formed();
-    g.in_edges = vec![InEdge { rel: RelType::Brand, src: 99 }];
+    g.in_edges = vec![InEdge {
+        rel: RelType::Brand,
+        src: 99,
+    }];
     assert!(roundtrip(&g, "src_oob").is_err());
 }
 
