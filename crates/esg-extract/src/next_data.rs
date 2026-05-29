@@ -60,7 +60,12 @@ pub fn ingest_next_product(b: &mut GraphBuilder, p: &Value, scale: &crate::price
         None => return,
     };
     let name = first_str(obj, &["name", "title", "productName"]).unwrap_or_default();
-    let id = first_str(obj, &["id", "sku", "handle", "productId"]).unwrap_or_else(|| name.clone());
+    // Identity priority: product id (string OR numeric) → sku → handle → name.
+    // The id is the cross-view stable key shared with a listing card / detail
+    // page, so it must win — and it's often a JSON number, which a string-only
+    // read would miss, falling back to a slug that wouldn't dedup against the
+    // numeric-id view.
+    let id = first_id(obj, &["id", "productId", "sku", "handle"]).unwrap_or_else(|| name.clone());
     if id.is_empty() {
         return;
     }
@@ -112,4 +117,18 @@ fn first_str(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<Stri
     keys.iter()
         .find_map(|k| obj.get(*k).and_then(Value::as_str))
         .map(str::to_string)
+}
+
+/// Like `first_str` but for identity fields: accepts a JSON number as well as a
+/// string (a product `id` is frequently numeric), rendered without quotes so it
+/// matches the same id read as a number elsewhere. Empty strings are skipped.
+fn first_id(obj: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|k| {
+        obj.get(*k).and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+                .filter(|s| !s.is_empty())
+        })
+    })
 }

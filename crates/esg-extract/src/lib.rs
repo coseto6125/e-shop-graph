@@ -280,19 +280,30 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
         return;
     }
     let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
-    // Stable id: prefer @id, then sku, then url, then name (last-resort).
-    // `url` is added between sku and name because real-world JSON-LD often
-    // omits @id/sku but always carries a canonical product URL — the same
-    // field other extractors key on. Falling through to `name` instead
-    // would collapse different products that happen to share a display
-    // name into one node.
+    // Identity priority: product id (`productId`/`id`, string OR numeric) →
+    // @id → sku → url → name. The store product id is the cross-view stable key
+    // (a listing card / detail page elsewhere carry the same one), so it wins
+    // when present — and it may be a JSON number, which a string-only read would
+    // miss. `url` stays ahead of `name` because real-world JSON-LD often omits
+    // every id but always carries a canonical product URL; falling to `name`
+    // would collapse distinct products that share a display name.
     let id = obj
-        .get("@id")
-        .or_else(|| obj.get("sku"))
-        .or_else(|| obj.get("url"))
-        .and_then(Value::as_str)
-        .unwrap_or(name)
-        .to_string();
+        .get("productId")
+        .or_else(|| obj.get("id"))
+        .and_then(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .or_else(|| v.as_i64().map(|n| n.to_string()))
+        })
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            obj.get("@id")
+                .or_else(|| obj.get("sku"))
+                .or_else(|| obj.get("url"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| name.to_string());
 
     // Pull the offer's price field BEFORE the upsert so the Product node
     // ships with normalized price props. JSON-LD `offers` may be an Offer

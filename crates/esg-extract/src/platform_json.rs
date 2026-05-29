@@ -79,12 +79,21 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale, origi
         .or_else(|| p.get("title"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    // Stable id: handle is the platform's slug; fall back to numeric id.
+    // Identity priority: numeric product id → handle → name. The product id is
+    // the cross-view stable key — a detail page (microdata) and this listing
+    // card carry the SAME id, while their urls/handles can differ
+    // (collection-scoped vs bare), so keying on id collapses what would
+    // otherwise be two nodes for one product. handle (the platform slug) is the
+    // fallback for arrays that omit a numeric id; name is last resort.
     let id = p
-        .get("handle")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .or_else(|| p.get("id").map(|v| v.to_string()))
+        .get("id")
+        .and_then(|v| {
+            v.as_i64()
+                .map(|n| n.to_string())
+                .or_else(|| v.as_str().map(str::to_string))
+        })
+        .filter(|s| !s.is_empty())
+        .or_else(|| p.get("handle").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| name.to_string());
     if id.is_empty() {
         return;

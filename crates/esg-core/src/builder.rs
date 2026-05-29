@@ -6,6 +6,16 @@
 use crate::graph::{Edge, Graph, InEdge, Node, Str, MAGIC, VERSION};
 use crate::schema::{NodeKind, RelType};
 use std::collections::{HashMap, HashSet};
+use xxhash_rust::xxh3::Xxh3Builder;
+
+// Build-time maps key on owned `String`s (node ids, interned strings) and are
+// hammered once per node/edge during `build()`. The default SipHash is DoS-
+// hardened — irrelevant for a single-process graph build over trusted crawl
+// data — and measurably slower on these short string keys than xxh3, which esg
+// already depends on for the graph fingerprint. Swap the hasher (not the map
+// type) so every lookup/insert in the hot path skips SipHash's keying cost.
+type FastMap<K, V> = HashMap<K, V, Xxh3Builder>;
+type FastSet<T> = HashSet<T, Xxh3Builder>;
 
 /// Pull the `url` string out of a node's props JSON, if present. Used by
 /// `remove_node_by_url` to map a caller-held product URL to its internal node.
@@ -17,10 +27,37 @@ fn prop_url(props: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Merge `new` props over `old`, field by field: a `new` value wins ONLY when
+/// it is present and non-empty, otherwise the `old` value survives.
+///
+/// One product reaches the graph from several sources under one id — a listing
+/// card (price, image, no blurb) and the detail page (the `og:description`
+/// blurb). A plain last-write-wins overwrite would let whichever the extractor
+/// emits last clobber the other's fields, so a blurb-less card could erase the
+/// detail page's description. Field-wise non-empty-wins keeps every source's
+/// best contribution while still letting a re-crawl update a changed price
+/// (a new non-empty price overwrites the old one). Returns the merged JSON
+/// string, or `new` verbatim when either side isn't a JSON object.
+fn merge_props(old: &str, new: &str) -> String {
+    let (Ok(serde_json::Value::Object(old_map)), Ok(serde_json::Value::Object(new_map))) =
+        (serde_json::from_str(old), serde_json::from_str(new))
+    else {
+        return new.to_string();
+    };
+    let mut merged = old_map;
+    for (k, v) in new_map {
+        let empty = v.is_null() || v.as_str() == Some("");
+        if !empty {
+            merged.insert(k, v);
+        }
+    }
+    serde_json::Value::Object(merged).to_string()
+}
+
 /// Intern `s` into `pool`, deduping via `seen`. Used by `build()` to compact
 /// the pool from surviving nodes. Free function (not a method) so it borrows
 /// only `pool`/`seen`, sidestepping a self-borrow against the old pool.
-fn reintern(s: &str, pool: &mut Vec<u8>, seen: &mut HashMap<String, Str>) -> Str {
+fn reintern(s: &str, pool: &mut Vec<u8>, seen: &mut FastMap<String, Str>) -> Str {
     if let Some(&existing) = seen.get(s) {
         return existing;
     }
@@ -37,15 +74,15 @@ fn reintern(s: &str, pool: &mut Vec<u8>, seen: &mut HashMap<String, Str>) -> Str
 #[derive(Default)]
 pub struct GraphBuilder {
     pool: Vec<u8>,
-    intern: HashMap<String, Str>,
+    intern: FastMap<String, Str>,
     nodes: Vec<Node>,
     /// node id -> index, for dedup + edge target resolution.
-    id_index: HashMap<String, u32>,
+    id_index: FastMap<String, u32>,
     /// (src_idx, rel, dst_id) collected before targets may exist; resolved in build().
     pending_edges: Vec<(u32, RelType, String)>,
     /// Node ids marked for removal in `build()` (incremental off-sale). Empty
     /// on a fresh build, so the normal path pays nothing.
-    removed: HashSet<String>,
+    removed: FastSet<String>,
 }
 
 impl GraphBuilder {
@@ -101,18 +138,32 @@ impl GraphBuilder {
         slice
     }
 
-    /// Insert a node identified by `id`, or — if `id` already exists — OVERWRITE
-    /// its `name`/`props`/`kind` in place and return the existing index. The
-    /// overwrite is what makes incremental re-ingest work: a re-crawled product
-    /// whose price changed updates the node rather than being dropped as a dup.
-    /// (Within a single fresh build the same id is only re-seen as a redundant
-    /// re-statement of identical data, so the overwrite is a harmless no-op
-    /// there.) New strings are interned; the old `Str` slices are abandoned in
-    /// the pool — `build()` compacts the pool, so stale bytes never ship.
+    /// Insert a node identified by `id`, or — if `id` already exists — MERGE the
+    /// incoming `name`/`props` into it (field-wise, non-empty wins; see
+    /// `merge_props`) and return the existing index. Merging is what lets the
+    /// several sources of one product (a listing card + its detail page) build a
+    /// complete node under one id instead of one source's blurb-less card
+    /// erasing another's description — while a re-crawl still updates a changed
+    /// price (a new non-empty value overwrites the old). An empty incoming
+    /// `name` likewise keeps the existing one. New strings are interned; the old
+    /// `Str` slices are abandoned in the pool — `build()` compacts it, so stale
+    /// bytes never ship.
     pub fn upsert_node(&mut self, kind: NodeKind, id: &str, name: &str, props: &str) -> u32 {
-        let name_str = self.intern(name);
-        let props_str = self.intern(props);
         if let Some(&idx) = self.id_index.get(id) {
+            let old_props = {
+                let p = &self.nodes[idx as usize].props;
+                std::str::from_utf8(&self.pool[p.off as usize..(p.off + p.len) as usize])
+                    .unwrap_or("{}")
+                    .to_string()
+            };
+            let merged = merge_props(&old_props, props);
+            let props_str = self.intern(&merged);
+            // Keep the existing name when the incoming one is empty.
+            let name_str = if name.is_empty() {
+                self.nodes[idx as usize].name
+            } else {
+                self.intern(name)
+            };
             let node = &mut self.nodes[idx as usize];
             node.kind = kind;
             node.name = name_str;
@@ -120,6 +171,8 @@ impl GraphBuilder {
             self.removed.remove(id); // re-stating a node un-removes it
             return idx;
         }
+        let name_str = self.intern(name);
+        let props_str = self.intern(props);
         let node = Node {
             kind,
             id: self.intern(id),
@@ -213,7 +266,7 @@ impl GraphBuilder {
         // 2. Rebuild nodes + a fresh, compact string pool from survivors only.
         //    Re-interning drops abandoned (overwritten) and removed bytes.
         let mut new_pool: Vec<u8> = Vec::with_capacity(pool.len());
-        let mut new_intern: HashMap<String, Str> = HashMap::new();
+        let mut new_intern: FastMap<String, Str> = FastMap::default();
         let str_of = |st: &Str| -> &str {
             std::str::from_utf8(&pool[st.off as usize..(st.off + st.len) as usize])
                 .expect("string_pool utf8")
@@ -310,6 +363,76 @@ mod tests {
             "props should be overwritten: {props}"
         );
         assert!(!props.contains("690"), "stale price must be gone: {props}");
+    }
+
+    /// One product's two sources merge under one id: the detail page carries the
+    /// `description` blurb, the listing card carries `image` but no blurb. A
+    /// later blurb-less re-statement must NOT erase the description — field-wise
+    /// non-empty-wins keeps every source's contribution.
+    #[test]
+    fn upsert_merges_fields_blurbless_does_not_erase_description() {
+        let mut b = GraphBuilder::new();
+        // detail page first: has the blurb.
+        b.upsert_node(
+            NodeKind::Product,
+            "p1",
+            "Tee",
+            r#"{"url":"/p/tee","description":"soft cotton"}"#,
+        );
+        // listing card second: image + price, no description, empty name.
+        b.upsert_node(
+            NodeKind::Product,
+            "p1",
+            "",
+            r#"{"url":"/p/tee","image":"https://cdn/t.jpg","description":""}"#,
+        );
+        let g = b.build();
+        assert_eq!(g.nodes.len(), 1);
+        let (_, props) = node(&g, "p1").unwrap();
+        assert!(
+            props.contains("soft cotton"),
+            "description must survive a later blurb-less write: {props}"
+        );
+        assert!(
+            props.contains("cdn/t.jpg"),
+            "later image must be merged in: {props}"
+        );
+        // Empty incoming name kept the existing one.
+        let name = g
+            .nodes
+            .iter()
+            .find(|nd| g.str(&nd.id) == "p1")
+            .map(|nd| g.str(&nd.name))
+            .unwrap();
+        assert_eq!(
+            name, "Tee",
+            "empty incoming name must not clobber the existing name"
+        );
+    }
+
+    /// Reverse order must also hold: a blurb arriving AFTER a blurb-less card
+    /// fills the empty description (non-empty new value wins).
+    #[test]
+    fn upsert_merges_fields_later_blurb_fills_empty() {
+        let mut b = GraphBuilder::new();
+        b.upsert_node(
+            NodeKind::Product,
+            "p1",
+            "Tee",
+            r#"{"url":"/p/tee","description":""}"#,
+        );
+        b.upsert_node(
+            NodeKind::Product,
+            "p1",
+            "Tee",
+            r#"{"url":"/p/tee","description":"soft cotton"}"#,
+        );
+        let g = b.build();
+        let (_, props) = node(&g, "p1").unwrap();
+        assert!(
+            props.contains("soft cotton"),
+            "later non-empty blurb must win: {props}"
+        );
     }
 
     /// remove_node drops the node AND every edge touching it, and renumbers the

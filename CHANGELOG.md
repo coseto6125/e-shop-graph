@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.8.0 — product-id node identity (dedup detail/listing into one node)
+
+Rebuild graphs to benefit — `graph.bin` format is unchanged (VERSION 6, old
+files still load), but node identity changed, so duplicate Product nodes only
+collapse on a fresh build.
+
+### Fixed
+- One product reached the graph as **two Product nodes** when its detail page
+  and a collection-listing card were extracted by different paths keying on
+  different ids (the detail page on its URL, the listing card on the numeric
+  product id). The description (detail page) and the price/image (listing card)
+  landed on separate nodes, so a consumer that picked the wrong node saw a
+  product with no description. On the doni catalogue this hit 559 of 693
+  products.
+
+### Changed
+- **Unified Product identity priority across every extractor: store product id
+  → url/handle → name.** The product id is the cross-view stable key, so a
+  detail page and a listing card for the same product now share one node id.
+  Ids are read whether they're a JSON string or number (a product id is
+  frequently numeric). Stores that expose no id fall back to the url (then
+  name), so identity is never worse than before.
+- microdata now reads the page's store product id from `data-addtocart='{"id":
+  N,…}'` / `data-product-id` on single-product detail pages, so a detail page
+  shares the listing card's id.
+- `upsert_node` now **merges props field-wise (non-empty wins)** instead of a
+  last-write-wins overwrite. Re-stating a product under one id from several
+  sources accumulates each source's fields (description from one, image/price
+  from another) rather than letting a later, sparser statement erase an earlier
+  one. A re-crawl still updates a changed price (a new non-empty value wins).
+
+### Performance
+- Build-time id/intern maps now hash with xxh3 (already a dependency for the
+  graph fingerprint) instead of SipHash — faster lookups/inserts on the short
+  string keys hammered during a build, with no DoS concern on trusted crawl data.
+
 ## 0.6.0 — crash hardening, query perf, schema.org expansion
 
 On-disk `graph.bin` format VERSION 2 → 3 (rebuild graphs; old files are
