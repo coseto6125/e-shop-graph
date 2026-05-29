@@ -15,6 +15,14 @@ pub struct MicrodataProduct {
     pub image: Option<String>,
     pub url: Option<String>,
     pub description: Option<String>,
+    /// The store's stable numeric product id, when the page exposes one
+    /// (`data-addtocart='{"id":N,…}'` / `data-product-id` / a `"product_id":N`
+    /// JS literal). It's the SAME id a listing page's product-array carries, so
+    /// keying on it collapses the detail-page node and the listing-card node
+    /// into one — the duplicate-Product bug that split a product's description
+    /// (detail page) from its price/image (listing card). None on stores that
+    /// don't surface it; the id then falls back to the url.
+    pub product_id: Option<String>,
 }
 
 // Selectors compile once for the life of the process — rebuilding them per
@@ -44,6 +52,39 @@ static OG_DESC_SEL: LazyLock<Selector> = LazyLock::new(|| {
 static PRODUCT_SCOPE_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("[itemscope][itemtype*='Product']").unwrap());
 static URL_SEL: LazyLock<Selector> = LazyLock::new(|| Selector::parse("[itemprop='url']").unwrap());
+// Store-native product id carriers. `data-addtocart='{"id":N,…}'` (the cart
+// form) and `data-product-id` are how storefronts (easy.co / EasyStore) stamp
+// the numeric product id onto the detail page; the SAME id appears in a listing
+// page's product array, so reading it lets both views share one node id.
+static ADDTOCART_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("[data-addtocart]").unwrap());
+static PRODUCT_ID_ATTR_SEL: LazyLock<Selector> =
+    LazyLock::new(|| Selector::parse("[data-product-id]").unwrap());
+
+/// Page-level store product id, read from the DOM carriers storefronts emit.
+/// `data-addtocart` holds a JSON object whose `id` is the product id; a bare
+/// `data-product-id` attribute is the simpler form. None when neither is
+/// present — the caller falls back to the url for identity.
+fn page_product_id(doc: &Html) -> Option<String> {
+    if let Some(el) = doc.select(&ADDTOCART_SEL).next() {
+        if let Some(raw) = el.value().attr("data-addtocart") {
+            if let Ok(serde_json::Value::Object(obj)) = serde_json::from_str::<serde_json::Value>(raw) {
+                if let Some(id) = obj.get("id") {
+                    // `id` is usually a JSON number; render it without quotes/decimals.
+                    let s = id.as_i64().map(|n| n.to_string()).or_else(|| id.as_str().map(str::to_string));
+                    if let Some(s) = s {
+                        if !s.is_empty() {
+                            return Some(s);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    doc.select(&PRODUCT_ID_ATTR_SEL)
+        .find_map(|el| el.value().attr("data-product-id").map(str::to_string))
+        .filter(|s| !s.is_empty())
+}
 
 pub fn extract_microdata_products(html: &str) -> Vec<MicrodataProduct> {
     extract_from_dom(&Html::parse_document(html))
@@ -113,6 +154,10 @@ pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
     // once and share; per-product itemprops are read within each scope.
     let page_url = doc.select(&OG_URL_SEL).find_map(itemprop_value);
     let page_desc = doc.select(&OG_DESC_SEL).find_map(itemprop_value);
+    // Page-level store product id (detail page = one product). Like og:desc, only
+    // safe to attach when the page is ONE product — a listing's page-level id (if
+    // any) would otherwise stamp every card with the same id.
+    let page_pid = page_product_id(doc);
 
     // Listing / category pages mark each card with a Product itemscope. Extract
     // one MicrodataProduct per container, reading each itemprop ONLY within that
@@ -141,15 +186,18 @@ pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
                     .map(|u| absolutize(&u, base))
                     .or_else(|| page_url.clone()),
                 description: None,
+                product_id: None,
             })
         })
         .collect();
     if !scoped.is_empty() {
-        // og:description is page-level, so it describes THE product only when the
-        // page is a single-product detail page. On a listing (many scopes) it
-        // would be the collection's blurb, wrong for any one card — leave None.
+        // og:description + page-level product id are page-level, so they describe
+        // THE product only when the page is a single-product detail page. On a
+        // listing (many scopes) they'd be the collection's, wrong for any one
+        // card — attach only when there's exactly one scope.
         if let [only] = scoped.as_mut_slice() {
             only.description = page_desc;
+            only.product_id = page_pid;
         }
         return scoped;
     }
@@ -170,6 +218,7 @@ pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
             .map(|img| absolutize(&img, base)),
         url: page_url,
         description: page_desc,
+        product_id: page_pid,
     }]
 }
 
@@ -199,8 +248,16 @@ pub fn ingest_microdata(
     scale: &crate::price::PriceScale,
 ) {
     for p in products {
-        let id = p.url.as_deref().unwrap_or(&p.name);
+        // Identity priority: store product id → url → name. The product id is
+        // the cross-view stable key (listing card + detail page carry the same
+        // one), so it dedups a product that the url alone wouldn't when the two
+        // views' urls differ (collection-scoped vs bare). url is the portable
+        // fallback for stores that don't expose an id; name is last resort.
+        let id = p.product_id.as_deref().or(p.url.as_deref()).unwrap_or(&p.name);
         let mut props = serde_json::Map::new();
+        if let Some(ref pid) = p.product_id {
+            props.insert("product_id".into(), pid.clone().into());
+        }
         // Surface `url` into props so Cypher `RETURN p.url` works for
         // microdata-sourced Products, matching the parity contract every
         // other extractor honours (platform_json / dom_attr / next_data /
