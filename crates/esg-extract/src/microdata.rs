@@ -14,6 +14,7 @@ pub struct MicrodataProduct {
     pub currency: Option<String>,
     pub image: Option<String>,
     pub url: Option<String>,
+    pub description: Option<String>,
 }
 
 // Selectors compile once for the life of the process — rebuilding them per
@@ -28,6 +29,15 @@ static IMAGE_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("[itemprop='image']").unwrap());
 static OG_URL_SEL: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("meta[property='og:url']").unwrap());
+// Product description for a carousel subtitle. `og:description` is the clean,
+// page-level marketing copy (storefronts also expose it as
+// `<meta name=description>`); the JSON-LD `description` field is often raw HTML
+// (froala editor markup) and unusable, so we read the og form, not itemprop.
+// Page-level like og:url — only safe to attach when the page is ONE product
+// (scoped.len() == 1), else product A's copy would bleed onto product B.
+static OG_DESC_SEL: LazyLock<Selector> = LazyLock::new(|| {
+    Selector::parse("meta[property='og:description'], meta[name='description']").unwrap()
+});
 // Per-product container: an itemscope whose itemtype names a Product. A listing
 // page renders one of these per card, so grouping by container stops one
 // product's price binding to another's name.
@@ -99,14 +109,15 @@ fn absolutize(value: &str, base: Option<&str>) -> String {
 /// for an entire shop. Falling back to the element's text covers both forms
 /// without changing the contract on pages that do use `<meta>`.
 pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
-    // og:url is page-level (one canonical URL), so read it once from the whole
-    // document and share it; per-product itemprops are read within each scope.
+    // og:url / og:description are page-level (one per document), so read them
+    // once and share; per-product itemprops are read within each scope.
     let page_url = doc.select(&OG_URL_SEL).find_map(itemprop_value);
+    let page_desc = doc.select(&OG_DESC_SEL).find_map(itemprop_value);
 
     // Listing / category pages mark each card with a Product itemscope. Extract
     // one MicrodataProduct per container, reading each itemprop ONLY within that
     // container's subtree so product A's price can't bind to product B's name.
-    let scoped: Vec<MicrodataProduct> = doc
+    let mut scoped: Vec<MicrodataProduct> = doc
         .select(&PRODUCT_SCOPE_SEL)
         .filter_map(|scope| {
             let name = scope.select(&NAME_SEL).find_map(itemprop_value)?;
@@ -129,10 +140,17 @@ pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
                     .find_map(itemprop_value)
                     .map(|u| absolutize(&u, base))
                     .or_else(|| page_url.clone()),
+                description: None,
             })
         })
         .collect();
     if !scoped.is_empty() {
+        // og:description is page-level, so it describes THE product only when the
+        // page is a single-product detail page. On a listing (many scopes) it
+        // would be the collection's blurb, wrong for any one card — leave None.
+        if let [only] = scoped.as_mut_slice() {
+            only.description = page_desc;
+        }
         return scoped;
     }
 
@@ -151,6 +169,7 @@ pub fn extract_from_dom(doc: &Html) -> Vec<MicrodataProduct> {
             .find_map(itemprop_value)
             .map(|img| absolutize(&img, base)),
         url: page_url,
+        description: page_desc,
     }]
 }
 
@@ -209,6 +228,14 @@ pub fn ingest_microdata(
         }
         if let Some(ref img) = p.image {
             props.insert("image".into(), img.clone().into());
+        }
+        // Product blurb for a carousel subtitle (og:description). Stored raw;
+        // the consumer (enoract) truncates to its per-platform subtitle cap.
+        if let Some(ref desc) = p.description {
+            let trimmed = desc.trim();
+            if !trimmed.is_empty() {
+                props.insert("description".into(), trimmed.into());
+            }
         }
         b.upsert_node(
             NodeKind::Product,
