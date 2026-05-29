@@ -10,6 +10,7 @@
 //!   C. `price_range{min,max}` — cyberbiz: no variant array, just a price band
 //! All three normalize onto the same Product→Variant graph shape.
 
+use crate::normalize;
 use crate::price::PriceScale;
 use esg_core::{GraphBuilder, NodeKind, RelType};
 use rust_decimal::Decimal;
@@ -72,7 +73,7 @@ fn parse_array_after_key(html: &str, key: &str) -> Option<Vec<Value>> {
 /// Ingest one platform product object into the graph: a Product node plus one
 /// Variant node per `variants[]` entry, linked by HasVariant. `scale` carries
 /// the page's visible prices, used to infer each JSON number's unit/currency.
-pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
+pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale, origin: Option<&str>) {
     let name = p
         .get("name")
         .or_else(|| p.get("title"))
@@ -92,7 +93,22 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale) {
     // decimal string `price_min` ("790.0" — the dot proves whole units), else
     // a numeric price_range.min.price.
     let peer_whole = whole_unit_peer(p);
-    let product_props = with_normalized_price(p, p.get("price"), scale, peer_whole);
+    let mut props = normalized_price_map(p, p.get("price"), scale, peer_whole);
+    // Absolutize the inline-JSON `url` (storefronts emit a root-relative
+    // `/products/…`, which 400s a LINE carousel uri) and surface a single
+    // `image` prop from whatever shape the source used (featured_image / images[]).
+    // Same normalization the microdata path applies — kept here so the JSON
+    // path doesn't drift back to relative URLs + no thumbnail.
+    if let Some(u) = p.get("url").and_then(Value::as_str) {
+        props.insert("url".into(), normalize::absolutize_url(u, origin).into());
+    }
+    if let Some(img) = normalize::extract_image(p) {
+        props.insert(
+            "image".into(),
+            normalize::absolutize_url(&img, origin).into(),
+        );
+    }
+    let product_props = Value::Object(props).to_string();
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &product_props);
 
     ingest_variants(b, p, &id, product_idx, scale, peer_whole);
