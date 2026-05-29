@@ -17,6 +17,22 @@ pub fn save(graph: &Graph, path: &Path) -> Result<usize> {
     Ok(bytes.len())
 }
 
+/// Load a `graph.bin` and DESERIALIZE it into an owned `Graph` (a full copy,
+/// NOT the zero-copy mmap of `LoadedGraph`). For the INCREMENTAL rebuild path
+/// only — `GraphBuilder::from_graph` needs an owned graph it can walk with the
+/// normal helpers, and an incremental run mutates + rewrites anyway, so the
+/// one-time copy is irrelevant. Query/read paths must keep using `LoadedGraph`.
+/// Validates the same invariants as `LoadedGraph::open` before deserializing.
+pub fn load_owned(path: &Path) -> Result<Graph> {
+    let file = fs::File::open(path).with_context(|| format!("open {path:?}"))?;
+    // SAFETY: file opened read-only; the mapping is only read, then dropped.
+    let mmap = unsafe { Mmap::map(&file)? };
+    let archived = rkyv::access::<ArchivedGraph, rkyv::rancor::Error>(&mmap[..])
+        .context("rkyv access (corrupt graph.bin?)")?;
+    validate_invariants(archived)?;
+    rkyv::deserialize::<Graph, rkyv::rancor::Error>(archived).context("rkyv deserialize graph")
+}
+
 /// mmap-backed zero-copy handle. The mmap stays alive as long as this struct
 /// does; `graph()` returns a reference INTO the mapped bytes — no copy, no
 /// deserialize.
@@ -58,7 +74,11 @@ impl LoadedGraph {
 /// a 32-bit `off + len` cannot wrap into a falsely-in-bounds value.
 fn validate_invariants(g: &ArchivedGraph) -> Result<()> {
     if g.magic != MAGIC {
-        bail!("graph.bin magic mismatch: got {:?}, expected {:?}", g.magic, MAGIC);
+        bail!(
+            "graph.bin magic mismatch: got {:?}, expected {:?}",
+            g.magic,
+            MAGIC
+        );
     }
     if g.version.to_native() != VERSION {
         bail!(
@@ -113,7 +133,11 @@ fn validate_invariants(g: &ArchivedGraph) -> Result<()> {
     // Every node string (id/name/props) is an (off,len) slice into the pool;
     // an overrunning slice panics in `Graph::str` / `arch_str`.
     for (i, node) in g.nodes.iter().enumerate() {
-        for (s, which) in [(&node.id, "id"), (&node.name, "name"), (&node.props, "props")] {
+        for (s, which) in [
+            (&node.id, "id"),
+            (&node.name, "name"),
+            (&node.props, "props"),
+        ] {
             let end = s.off.to_native() as u64 + s.len.to_native() as u64;
             if end > pool_len {
                 bail!("node {i} {which} Str overruns string_pool ({end} > {pool_len})");

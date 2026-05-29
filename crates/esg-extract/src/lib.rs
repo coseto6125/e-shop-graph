@@ -79,7 +79,10 @@ fn collect_objects(val: Value, out: &mut Vec<Value>) {
             // itself). Recurse so every listed Product becomes its own object,
             // instead of dropping the whole page as one non-Product node.
             let mut obj = val;
-            if let Some(list) = obj.as_object_mut().and_then(|m| m.remove("itemListElement")) {
+            if let Some(list) = obj
+                .as_object_mut()
+                .and_then(|m| m.remove("itemListElement"))
+            {
                 match list {
                     Value::Array(items) => items.into_iter().for_each(|it| {
                         let inner = it
@@ -169,13 +172,23 @@ fn ingest_into(builder: &mut GraphBuilder, page: &PageExtract, scale: &price::Pr
 /// batches where holding all HTML in memory is fine. Borrows the pages — it
 /// only reads them, so callers keep ownership.
 pub fn build_from_pages(pages: &[String]) -> Result<GraphBuilder> {
+    let mut builder = GraphBuilder::new();
+    ingest_pages_into(&mut builder, pages);
+    Ok(builder)
+}
+
+/// Extract `pages` and fold them into an EXISTING builder — the extraction half
+/// of incremental rebuild. A builder rehydrated via `GraphBuilder::from_graph`
+/// can take a handful of re-crawled pages here; each product `upsert_node`s,
+/// so a changed price overwrites in place rather than duplicating. Extraction
+/// is parallel (rayon); the ingest fold is serial because the builder is one
+/// shared mutable structure.
+pub fn ingest_pages_into(builder: &mut GraphBuilder, pages: &[String]) {
     let per_page: Vec<(PageExtract, price::PriceScale)> =
         pages.par_iter().map(|html| extract_page(html)).collect();
-    let mut builder = GraphBuilder::new();
     for (page, scale) in &per_page {
-        ingest_into(&mut builder, page, scale);
+        ingest_into(builder, page, scale);
     }
-    Ok(builder)
 }
 
 /// Memory-bounded build: mmap each HTML file in `paths` one at a time, extract,
@@ -277,11 +290,20 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
                 pm.insert(dst.into(), schema_enum_tail(v).into());
             }
         }
-        if let Some(s) = o.get("seller").and_then(|s| s.get("name")).and_then(Value::as_str) {
+        if let Some(s) = o
+            .get("seller")
+            .and_then(|s| s.get("name"))
+            .and_then(Value::as_str)
+        {
             pm.insert("seller_name".into(), s.into());
         }
     }
-    for (src, dst) in [("gtin13", "gtin13"), ("gtin", "gtin"), ("mpn", "mpn"), ("sku", "sku")] {
+    for (src, dst) in [
+        ("gtin13", "gtin13"),
+        ("gtin", "gtin"),
+        ("mpn", "mpn"),
+        ("sku", "sku"),
+    ] {
         if let Some(v) = obj.get(src).and_then(Value::as_str) {
             pm.insert(dst.into(), v.into());
         }
@@ -290,7 +312,10 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
         if let Some(rv) = rating.get("ratingValue") {
             pm.insert("rating_value".into(), rv.clone());
         }
-        if let Some(c) = rating.get("reviewCount").or_else(|| rating.get("ratingCount")) {
+        if let Some(c) = rating
+            .get("reviewCount")
+            .or_else(|| rating.get("ratingCount"))
+        {
             pm.insert("review_count".into(), c.clone());
         }
     }
@@ -299,8 +324,22 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
 
     // brand = marketing label, manufacturer = legal maker (distinct nodes;
     // they often differ in electronics / regulated goods).
-    ingest_named_entity(b, obj, "brand", NodeKind::Brand, RelType::Brand, product_idx);
-    ingest_named_entity(b, obj, "manufacturer", NodeKind::Organization, RelType::Manufacturer, product_idx);
+    ingest_named_entity(
+        b,
+        obj,
+        "brand",
+        NodeKind::Brand,
+        RelType::Brand,
+        product_idx,
+    );
+    ingest_named_entity(
+        b,
+        obj,
+        "manufacturer",
+        NodeKind::Organization,
+        RelType::Manufacturer,
+        product_idx,
+    );
     ingest_offers(b, obj, &id, product_idx);
     ingest_aggregate_rating(b, obj, &id, product_idx);
     ingest_reviews(b, obj, &id, product_idx);
@@ -366,15 +405,26 @@ fn ingest_aggregate_rating(b: &mut GraphBuilder, obj: &Value, id: &str, product_
         return;
     };
     let rating_id = format!("{id}#rating");
-    let rv = rating.get("ratingValue").map(|v| v.to_string()).unwrap_or_default();
+    let rv = rating
+        .get("ratingValue")
+        .map(|v| v.to_string())
+        .unwrap_or_default();
     let mut rm = rating.as_object().cloned().unwrap_or_default();
-    if let Some(c) = rating.get("reviewCount").or_else(|| rating.get("ratingCount")) {
+    if let Some(c) = rating
+        .get("reviewCount")
+        .or_else(|| rating.get("ratingCount"))
+    {
         rm.insert("review_count".into(), c.clone());
     }
     if let Some(v) = rating.get("ratingValue") {
         rm.insert("rating_value".into(), v.clone());
     }
-    b.upsert_node(NodeKind::AggregateRating, &rating_id, &rv, &Value::Object(rm).to_string());
+    b.upsert_node(
+        NodeKind::AggregateRating,
+        &rating_id,
+        &rv,
+        &Value::Object(rm).to_string(),
+    );
     b.add_edge(product_idx, RelType::AggregateRating, &rating_id);
 }
 
@@ -399,13 +449,20 @@ fn ingest_reviews(b: &mut GraphBuilder, obj: &Value, id: &str, product_idx: u32)
         if let Some(d) = rv.get("datePublished") {
             rm.insert("date".into(), d.clone());
         }
-        let review_idx = b.upsert_node(NodeKind::Review, &rid, body, &Value::Object(rm).to_string());
+        let review_idx =
+            b.upsert_node(NodeKind::Review, &rid, body, &Value::Object(rm).to_string());
         b.add_edge(product_idx, RelType::Review, &rid);
 
         let author = rv.get("author");
-        let aname = author.and_then(|a| a.get("name").and_then(Value::as_str).or_else(|| a.as_str()));
+        let aname =
+            author.and_then(|a| a.get("name").and_then(Value::as_str).or_else(|| a.as_str()));
         if let Some(an) = aname.filter(|s| !s.is_empty()) {
-            b.upsert_node(NodeKind::Person, an, an, &author.map(|a| a.to_string()).unwrap_or_default());
+            b.upsert_node(
+                NodeKind::Person,
+                an,
+                an,
+                &author.map(|a| a.to_string()).unwrap_or_default(),
+            );
             b.add_edge(review_idx, RelType::Author, an);
         }
     }

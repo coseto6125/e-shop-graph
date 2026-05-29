@@ -188,15 +188,7 @@ pub(crate) fn normalized_price_map(
 ) -> serde_json::Map<String, Value> {
     let mut map = obj.as_object().cloned().unwrap_or_default();
     if let Some(v) = scale.verdict(price_field, peer_whole) {
-        // Pull primitive fields off before the String move so the verdict is
-        // not partially-moved when we read `.score` / `.confident()`.
-        let confident = v.confident();
-        let score = v.score;
-        let currency = v.currency.to_string();
-        map.insert("price".into(), Value::String(v.price));
-        map.insert("currency".into(), Value::String(currency));
-        map.insert("price_confident".into(), Value::Bool(confident));
-        map.insert("price_score".into(), Value::Number(score.into()));
+        v.write_into(&mut map);
     }
     map
 }

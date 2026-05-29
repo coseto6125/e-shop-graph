@@ -231,7 +231,11 @@ mod tests {
         // CJK after a dot (e.g. `RETURN p.名稱`) tokenizes cleanly.
         assert_eq!(
             tokenize("p.名稱").unwrap(),
-            vec![Token::Ident("p".into()), Token::Dot, Token::Ident("名稱".into())]
+            vec![
+                Token::Ident("p".into()),
+                Token::Dot,
+                Token::Ident("名稱".into())
+            ]
         );
     }
 

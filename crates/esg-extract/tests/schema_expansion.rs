@@ -8,8 +8,12 @@ use esg_core::graph::ArchivedGraph;
 use esg_extract::build_from_pages;
 
 fn rows(html: &str, query: &str) -> Vec<Vec<Value>> {
-    let graph = build_from_pages(&[html.to_string()]).expect("build").build();
-    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph).expect("serialize").to_vec();
+    let graph = build_from_pages(&[html.to_string()])
+        .expect("build")
+        .build();
+    let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&graph)
+        .expect("serialize")
+        .to_vec();
     let archived = rkyv::access::<ArchivedGraph, rkyv::rancor::Error>(&bytes).expect("access");
     cypher::query(archived, query).expect("cypher").rows
 }
@@ -36,7 +40,10 @@ const RICH: &str = r#"<!doctype html><html><head>
 
 #[test]
 fn offer_scalars_inline_on_product() {
-    let r = rows(RICH, r#"MATCH (p:Product) WHERE p.availability = "InStock" RETURN p.item_condition"#);
+    let r = rows(
+        RICH,
+        r#"MATCH (p:Product) WHERE p.availability = "InStock" RETURN p.item_condition"#,
+    );
     assert_eq!(r.len(), 1);
     assert_eq!(r[0][0], Value::Str("NewCondition".into()));
 }
@@ -51,17 +58,26 @@ fn identity_props_inline_on_product() {
 
 #[test]
 fn aggregate_rating_scalars_queryable() {
-    let r = rows(RICH, "MATCH (a:AggregateRating) WHERE a.rating_value >= 4 RETURN a.review_count");
+    let r = rows(
+        RICH,
+        "MATCH (a:AggregateRating) WHERE a.rating_value >= 4 RETURN a.review_count",
+    );
     assert_eq!(r.len(), 1);
     assert_eq!(r[0][0], Value::Int(210));
     // mirrored onto Product for single-node filtering
-    let pr = rows(RICH, "MATCH (p:Product) WHERE p.review_count > 100 RETURN p.rating_value");
+    let pr = rows(
+        RICH,
+        "MATCH (p:Product) WHERE p.review_count > 100 RETURN p.rating_value",
+    );
     assert_eq!(pr.len(), 1);
 }
 
 #[test]
 fn manufacturer_organization_distinct_from_brand() {
-    let r = rows(RICH, "MATCH (p:Product)-[:Manufacturer]->(o:Organization) RETURN o.name");
+    let r = rows(
+        RICH,
+        "MATCH (p:Product)-[:Manufacturer]->(o:Organization) RETURN o.name",
+    );
     assert_eq!(r, vec![vec![Value::Str("Nike Inc".into())]]);
     let b = rows(RICH, "MATCH (p:Product)-[:Brand]->(b:Brand) RETURN b.name");
     assert_eq!(b, vec![vec![Value::Str("Nike".into())]]);
@@ -75,7 +91,10 @@ fn reviews_and_authors_wired() {
     );
     assert_eq!(r, vec![vec![Value::Str("Alice".into())]]);
     // both reviews exist as nodes
-    let all = rows(RICH, "MATCH (p:Product)-[:Review]->(r:Review) RETURN count(r)");
+    let all = rows(
+        RICH,
+        "MATCH (p:Product)-[:Review]->(r:Review) RETURN count(r)",
+    );
     assert_eq!(all[0][0], Value::Int(2));
 }
 
@@ -111,6 +130,9 @@ const MULTI_OFFER: &str = r#"<!doctype html><html><head>
 
 #[test]
 fn multi_offer_array_yields_one_node_each() {
-    let r = rows(MULTI_OFFER, "MATCH (p:Product)-[:Offers]->(o:Offer) RETURN count(o)");
+    let r = rows(
+        MULTI_OFFER,
+        "MATCH (p:Product)-[:Offers]->(o:Offer) RETURN count(o)",
+    );
     assert_eq!(r[0][0], Value::Int(2));
 }
