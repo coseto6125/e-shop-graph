@@ -75,12 +75,19 @@ pub enum Op {
     Or,
 }
 
-/// Substring match flavor for `STARTS WITH` / `CONTAINS` / `ENDS WITH`.
+/// Substring match flavor for `STARTS WITH` / `CONTAINS` / `ENDS WITH` / `FUZZY`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrMatch {
     StartsWith,
     Contains,
     EndsWith,
+    /// `FUZZY` — CJK-friendly recall. The needle is sliced into overlapping
+    /// 2-grams and the haystack matches if it contains ANY of them. A CJK
+    /// compound the user spells differently from the catalogue ("針織衫" vs the
+    /// stocked "針織上衣") still hits on the shared morpheme ("針織"), while a
+    /// cross-boundary gram ("織衫") matches nothing, so recall rises without
+    /// noise. A needle shorter than 2 chars degrades to a plain `Contains`.
+    Fuzzy,
 }
 
 #[derive(Debug, Clone)]

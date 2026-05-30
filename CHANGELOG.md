@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.1 — `FUZZY` Cypher operator (CJK morpheme recall)
+
+`graph.bin` format is unchanged (VERSION 6, old files still load) — this is a
+query-side addition only, so existing graphs gain the operator with no rebuild.
+
+### Added
+- **`FUZZY` string-match operator: `WHERE p.name FUZZY '針織衫'`.** The needle is
+  sliced into overlapping 2-grams and a node matches if its value contains ANY of
+  them. This recovers CJK compounds the catalogue spells differently from the
+  user — "針織衫" (which appears in no product name) matches "針織上衣"/"針織毛衣"
+  on the shared morpheme "針織", where `CONTAINS '針織衫'` returns nothing.
+  Cross-boundary grams ("織衫") match no product, so recall rises without noise.
+  A needle shorter than 2 chars degrades to a plain `CONTAINS`. Operates on
+  `char`s (multi-byte-safe), case-insensitive like the other string matchers.
+
 ## 0.8.0 — product-id node identity (dedup detail/listing into one node)
 
 Rebuild graphs to benefit — `graph.bin` format is unchanged (VERSION 6, old

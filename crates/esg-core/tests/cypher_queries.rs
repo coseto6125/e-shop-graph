@@ -127,6 +127,34 @@ fn ends_with_matches_suffix() {
 }
 
 #[test]
+fn fuzzy_matches_on_shared_bigram() {
+    // "Nikz" never appears as a whole substring, but its 2-grams ["Ni","ik","kz"]
+    // include "Ni"/"ik", which the Nike products contain — so FUZZY recovers them
+    // where CONTAINS 'Nikz' would return nothing.
+    let bytes = sample_graph_bytes();
+    let rows = run(
+        &bytes,
+        "MATCH (p:Product) WHERE p.name FUZZY 'Nikz' RETURN p.name",
+    );
+    let mut got = names(&rows);
+    got.sort();
+    assert_eq!(got, vec!["Nike Air Zoom", "Nike Pegasus Pro"]);
+}
+
+#[test]
+fn fuzzy_short_needle_is_plain_contains() {
+    // A 1-char needle has no 2-gram, so FUZZY degrades to a substring test.
+    let bytes = sample_graph_bytes();
+    let rows = run(
+        &bytes,
+        "MATCH (p:Product) WHERE p.name FUZZY 'P' RETURN p.name",
+    );
+    let mut got = names(&rows);
+    got.sort();
+    assert_eq!(got, vec!["Nike Pegasus Pro", "Puma Velocity"]);
+}
+
+#[test]
 fn in_list_filters_brand() {
     let bytes = sample_graph_bytes();
     let rows = run(
