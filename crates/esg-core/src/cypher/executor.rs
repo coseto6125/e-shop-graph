@@ -129,6 +129,25 @@ fn column_name(ri: &ReturnItem) -> String {
     }
 }
 
+/// `FUZZY` match: `hay` contains ANY overlapping 2-gram of `pat`.
+///
+/// Recall aid for CJK, where the user's compound is often spelled differently
+/// from the catalogue. "針織衫" slices to ["針織","織衫"]; the stocked "針織上衣"
+/// contains "針織" → match, and the cross-boundary "織衫" matches nothing on its
+/// own, so recall rises without dragging in unrelated products. Both sides are
+/// already lowercased by the caller. A needle of fewer than 2 chars has no
+/// 2-gram, so it falls back to a plain substring test. Operates on `char`s, not
+/// bytes, so multi-byte CJK windows are correct.
+fn fuzzy_contains(hay: &str, pat: &str) -> bool {
+    let chars: Vec<char> = pat.chars().collect();
+    if chars.len() < 2 {
+        return hay.contains(pat);
+    }
+    chars
+        .windows(2)
+        .any(|w| hay.contains(&w.iter().collect::<String>()))
+}
+
 /// Sort binding rows by the ORDER BY terms (stable, first term primary). An
 /// ORDER BY name may be a pattern variable OR a RETURN alias (`... AS price
 /// ORDER BY price`); aliases resolve back to the underlying var/prop.
@@ -407,6 +426,7 @@ fn eval_bool(
                     StrMatch::StartsWith => hay.starts_with(&pat),
                     StrMatch::Contains => hay.contains(&pat),
                     StrMatch::EndsWith => hay.ends_with(&pat),
+                    StrMatch::Fuzzy => fuzzy_contains(&hay, &pat),
                 }
             }
             _ => false,

@@ -394,6 +394,13 @@ impl Parser {
                 self.str_operand()?,
             ));
         }
+        if self.eat_kw("FUZZY") {
+            return Ok(Expr::StrMatch(
+                StrMatch::Fuzzy,
+                Box::new(lhs),
+                self.str_operand()?,
+            ));
+        }
         if self.eat_kw("IN") {
             return Ok(Expr::In(Box::new(lhs), self.list_literal()?));
         }
