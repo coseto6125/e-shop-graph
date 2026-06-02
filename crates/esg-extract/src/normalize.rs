@@ -53,6 +53,25 @@ pub fn url_origin(url: &str) -> Option<String> {
     }
 }
 
+/// One usable image URL out of an image node — a bare string, an
+/// `{img_url|src|url}` object, or the first resolvable element of an array
+/// (schema.org JSON-LD ships `image` as a URL-string array; storefronts ship
+/// `images[]` as image objects).
+fn from_image_node(node: &Value) -> Option<String> {
+    match node {
+        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::Object(m) => m
+            .get("img_url")
+            .or_else(|| m.get("src"))
+            .or_else(|| m.get("url"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        Value::Array(a) => a.iter().find_map(from_image_node),
+        _ => None,
+    }
+}
+
 /// Pull a usable image URL out of a source product object, trying the shapes
 /// storefronts actually emit, in priority order:
 ///   `featured_image.img_url` / `.src` → `image` (string, `{img_url|src}`, or
@@ -60,25 +79,6 @@ pub fn url_origin(url: &str) -> Option<String> {
 /// raw value; the caller absolutizes it (CDN URLs are usually already absolute,
 /// but a store-relative `/i/x.jpg` shouldn't slip through).
 pub fn extract_image(obj: &Value) -> Option<String> {
-    fn from_image_node(node: &Value) -> Option<String> {
-        match node {
-            Value::String(s) if !s.is_empty() => Some(s.clone()),
-            Value::Object(m) => m
-                .get("img_url")
-                .or_else(|| m.get("src"))
-                .or_else(|| m.get("url"))
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string),
-            // schema.org JSON-LD ships `image` as an array of URL strings
-            // (`"image":["https://…jpg",…]`); take the first that resolves, so
-            // the singular `image` key resolves an array the same way the
-            // plural `images` branch does.
-            Value::Array(a) => a.iter().find_map(from_image_node),
-            _ => None,
-        }
-    }
-
     if let Some(img) = obj.get("featured_image").and_then(from_image_node) {
         return Some(img);
     }
@@ -88,6 +88,64 @@ pub fn extract_image(obj: &Value) -> Option<String> {
     obj.get("images")
         .and_then(Value::as_array)
         .and_then(|a| a.iter().find_map(from_image_node))
+}
+
+/// A URL that is plainly chrome, not a product photo — a logo, banner, icon,
+/// sprite, favicon, theme asset, or an SVG (vector UI art, never a product
+/// shot). A programmatic, LLM-free guard: it never inspects pixels, only the
+/// URL path. Conservative by design — it excludes only well-known non-product
+/// path tokens, so a real product image is never dropped. The primary defence
+/// is still the SOURCE: `extract_images` only reads a product object's own
+/// `images[]`, where storefront chrome doesn't appear; this catches the rare
+/// store that inlines a placeholder/badge into that array.
+fn is_junk_image_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    let path = lower.split('?').next().unwrap_or(&lower);
+    path.ends_with(".svg")
+        || [
+            "/logo",
+            "/banner",
+            "/icon",
+            "favicon",
+            "/sprite",
+            "placeholder",
+            "/theme_src/",
+            "/default_img/",
+            "no-image",
+            "noimage",
+        ]
+        .iter()
+        .any(|frag| path.contains(frag))
+}
+
+/// All usable image URLs for a product, deduped and order-preserving:
+/// `featured_image` first (the hero shot), then every `images[]` / `image[]`
+/// element. Storefronts list the gallery under `images[]` (doni/easy.co:
+/// `[{img_url,…}, …]`); schema.org JSON-LD under a singular `image` array.
+/// Returns an empty vec when the object carries no image — the caller writes
+/// `p.images` only when non-empty, leaving the single `p.image` as the
+/// always-present primary.
+pub fn extract_images(obj: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |url: Option<String>| {
+        if let Some(u) = url {
+            if !out.contains(&u) && !is_junk_image_url(&u) {
+                out.push(u);
+            }
+        }
+    };
+    push(obj.get("featured_image").and_then(from_image_node));
+    for key in ["images", "image"] {
+        if let Some(arr) = obj.get(key).and_then(Value::as_array) {
+            for node in arr {
+                push(from_image_node(node));
+            }
+        } else if let Some(node) = obj.get(key) {
+            // `image` may be a bare string / object (not an array).
+            push(from_image_node(node));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -120,6 +178,35 @@ mod tests {
     fn image_from_featured_image_object() {
         let obj = json!({"featured_image": {"img_url": "https://cdn/x.jpg", "alt": "a"}});
         assert_eq!(extract_image(&obj).as_deref(), Some("https://cdn/x.jpg"));
+    }
+
+    #[test]
+    fn extract_images_collects_gallery_deduped() {
+        let obj = json!({
+            "featured_image": {"img_url": "https://cdn/hero.jpg"},
+            "images": [{"img_url": "https://cdn/hero.jpg"}, {"img_url": "https://cdn/back.jpg"}]
+        });
+        assert_eq!(
+            extract_images(&obj),
+            vec!["https://cdn/hero.jpg", "https://cdn/back.jpg"]
+        );
+    }
+
+    #[test]
+    fn extract_images_drops_junk_chrome() {
+        let obj = json!({"images": [
+            {"img_url": "https://cdn/products/real.jpg"},
+            {"img_url": "https://cdn/theme_src/logo.png"},
+            {"img_url": "https://cdn/badge.svg"},
+            {"img_url": "https://cdn/products/back.jpg"}
+        ]});
+        assert_eq!(
+            extract_images(&obj),
+            vec![
+                "https://cdn/products/real.jpg",
+                "https://cdn/products/back.jpg"
+            ]
+        );
     }
 
     #[test]

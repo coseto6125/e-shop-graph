@@ -148,6 +148,10 @@ fn fmt_value(v: &esg_core::cypher::Value) -> String {
         Float(f) => f.to_string(),
         Bool(b) => b.to_string(),
         Null => "null".into(),
+        List(items) => format!(
+            "[{}]",
+            items.iter().map(fmt_value).collect::<Vec<_>>().join(", ")
+        ),
         NodeRef { kind, name, .. } => format!("{kind}({name})"),
     }
 }

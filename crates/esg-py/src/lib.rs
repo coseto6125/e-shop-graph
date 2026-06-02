@@ -141,6 +141,13 @@ fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
         Value::Int(i) => i.into_pyobject(py)?.unbind().into(),
         Value::Float(f) => f.into_pyobject(py)?.unbind().into(),
         Value::Str(s) => s.into_pyobject(py)?.unbind().into(),
+        Value::List(items) => {
+            let list = PyList::empty(py);
+            for it in items {
+                list.append(value_to_py(py, it)?)?;
+            }
+            list.into_any().unbind()
+        }
         Value::NodeRef { idx, kind, name } => {
             let d = PyDict::new(py);
             d.set_item("idx", idx)?;
