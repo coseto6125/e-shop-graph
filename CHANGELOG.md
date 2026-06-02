@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.8.2 — price / image / url extraction across cyberbiz + shopline
+
+`graph.bin` format is unchanged (VERSION 6, old files still load). This is an
+extraction-side change: the new `price`/`image`/`url` props are written when a
+page is (re-)ingested, so **existing graphs must be re-crawled/re-built to gain
+them** — loading an old graph.bin works but its products keep the old (sparse)
+props.
+
+Validated end-to-end against real small/mid Taiwanese brand stores (茶籽堂,
+綠藤生機, Cyberbiz, meepshop): products that previously reached the graph
+name-only now carry price + image + canonical url.
+
+### Fixed
+- **Dropped the over-broad `"items"` key from the inline-product-array scan.**
+  It false-positively matched cyberbiz's `product_labels.items` config array
+  (`{"kind":"system","title":"特價標籤"}`) and shopline's `filter_tag` `items`
+  array, minting label/tag nodes as Products and preempting the real products.
+  A `kind`-field discriminator additionally guards the remaining keys against
+  the same class of false positive.
+- **JSON-LD products now surface an `image`.** `ingest_object` never called the
+  shared image extractor, so JSON-LD-only products (shopline detail pages,
+  meepshop) reached the graph thumbnail-less.
+- **`extract_image` reads the schema.org singular `image:[url,…]` array shape**
+  (previously only string / `{img_url|src|url}` object / plural `images[]`).
+- **`AggregateOffer.lowPrice` is used when `Offer.price` is absent** — multi-
+  variant stores (meepshop) expose a price band, not a scalar price.
+- **A `ga-product` (shopline) page also folds in its JSON-LD subject.** On a
+  detail page the `ga-product` attrs are recommendation-widget products
+  (id/sku/title, no price/image) while the page subject lives ONLY in JSON-LD;
+  both are now ingested (upsert-by-id merges overlaps). Listing pages, where
+  `ga-product` is the rich source, are unaffected (no JSON-LD Product to fold).
+- **`<link rel=canonical>` becomes `Product.url` when JSON-LD omits a url**,
+  scoped to single-subject detail pages so recommendation products on the same
+  page don't inherit it.
+
 ## 0.8.1 — `FUZZY` Cypher operator (CJK morpheme recall)
 
 `graph.bin` format is unchanged (VERSION 6, old files still load) — this is a
