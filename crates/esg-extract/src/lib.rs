@@ -312,6 +312,20 @@ fn product_group_variants(obj: &Value) -> impl Iterator<Item = &Value> {
     .iter()
 }
 
+/// A ProductGroup's stable group identity, for stamping its variants. Prefers
+/// `productGroupID` (schema.org's explicit grouping key) then `@id` then the
+/// group `url` — the same identity-priority spirit as the per-Product id, but a
+/// group rarely carries a numeric id so no numeric arm is needed. None when the
+/// group declares no identity (then variants stay ungrouped rather than sharing
+/// a bogus key).
+fn product_group_id(obj: &Value) -> Option<String> {
+    ["productGroupID", "@id", "url"]
+        .iter()
+        .find_map(|k| obj.get(*k).and_then(Value::as_str))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 /// Extract the `<link rel="canonical" href="…">` product URL — a cheap
 /// substring scan (no DOM build for the JSON-only path). None when absent.
 /// This is the page's own declared canonical, used as `Product.url` when the
@@ -392,7 +406,7 @@ fn ingest_into(
                 .then_some(meta.canonical.as_deref())
                 .flatten();
             for obj in ld_products {
-                ingest_object(builder, obj, scale, canonical);
+                ingest_object(builder, obj, scale, canonical, None);
             }
         }
         PageExtract::NextData(products) => {
@@ -409,7 +423,7 @@ fn ingest_into(
                 .then_some(meta.canonical.as_deref())
                 .flatten();
             for obj in objects {
-                ingest_object(builder, obj, scale, canonical);
+                ingest_object(builder, obj, scale, canonical, None);
             }
         }
         PageExtract::Hypernova(products, canonical) => {
@@ -560,6 +574,7 @@ fn ingest_object(
     obj: &Value,
     scale: &price::PriceScale,
     page_url: Option<&str>,
+    group_id: Option<&str>,
 ) {
     // ProductGroup (Shopify variant model): the group carries no price/image of
     // its own — its sellable products live under `hasVariant[]`, each a full
@@ -567,10 +582,15 @@ fn ingest_object(
     // variant (distinct sku/@id ⇒ distinct nodes; per-variant price/stock/image
     // would be lost by merging). A parent Product node would fail the signal
     // gate and orphan the variants, so per-variant Product is the only shape
-    // that survives the gate.
+    // that survives the gate. The group's identity (`@id`/`productGroupID`) is
+    // threaded into each variant so downstream retrieval can collapse a multi-
+    // colour product to one carousel card via `COALESCE(product_group_id, id)` —
+    // a store with no ProductGroup (doni, plain detail pages) leaves it None and
+    // every product is its own group (the coalesce is a no-op there).
     if is_product_group(obj) {
+        let gid = product_group_id(obj);
         for v in product_group_variants(obj) {
-            ingest_object(b, v, scale, page_url);
+            ingest_object(b, v, scale, page_url, gid.as_deref());
         }
         return;
     }
@@ -709,6 +729,18 @@ fn ingest_object(
     // image / a /products/ url), so this never drops a genuine product.
     if !has_product_signal(&pm) {
         return;
+    }
+    // Variant grouping: stamp the owning ProductGroup id so retrieval can roll a
+    // multi-variant product up to one carousel card via
+    // `COALESCE(product_group_id, id)` — distinct ids when ungrouped, a shared
+    // id within a group. None when the product has no group (the common case:
+    // doni / plain detail pages carry no prop, so the coalesce is a no-op and
+    // every product stays its own card). A prop, not an `IsVariantOf` edge: the
+    // edge would need a ProductGroup target node (which has no price/image of
+    // its own and would fail the signal gate), and the prop alone is what the
+    // group-by collapse reads — the edge would be dropped as dangling anyway.
+    if let Some(gid) = group_id {
+        pm.insert("product_group_id".into(), gid.into());
     }
     let props = Value::Object(pm).to_string();
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &props);

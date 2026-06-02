@@ -321,7 +321,7 @@ fn test_cyberbiz_breadcrumb_only_ld_does_not_win_falls_to_real_product() {
 const SHOPIFY_PRODUCT_GROUP: &str = r#"<!doctype html><html><head>
 <meta property="og:url" content="https://jiwudoc.myshopify.com/products/dress">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"ProductGroup","name":"露肩洋裝",
+{"@context":"https://schema.org","@type":"ProductGroup","productGroupID":"QZC007","name":"露肩洋裝",
  "hasVariant":[
   {"@type":"Product","name":"露肩洋裝 - 紫紅","sku":"QZC007-PNK",
    "image":"https://cdn/pnk.jpg",
@@ -356,6 +356,41 @@ fn test_shopify_productgroup_hasvariant_emits_per_variant_products() {
     assert_eq!(
         one_str(SHOPIFY_PRODUCT_GROUP, &format!("{q}p.availability")).as_deref(),
         Some("OutOfStock")
+    );
+    // v0.8.5: every variant carries the owning group id so retrieval can roll
+    // the 3 colours up to one carousel card via COALESCE(product_group_id, id).
+    assert_eq!(
+        count(
+            SHOPIFY_PRODUCT_GROUP,
+            "MATCH (p:Product) WHERE p.product_group_id = 'QZC007' RETURN p.name"
+        ),
+        3
+    );
+}
+
+// ── v0.8.5: a plain Product (no ProductGroup wrapper) carries NO
+// product_group_id — every store without a variant model (doni, plain detail
+// pages) leaves the prop absent so the COALESCE group-by is a no-op there. ────
+const PLAIN_PRODUCT_NO_GROUP: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://shop.example/products/solo">
+<link rel="canonical" href="https://shop.example/products/solo">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"單一商品","sku":"SOLO-1",
+ "image":"https://cdn/solo.jpg",
+ "offers":{"@type":"Offer","price":"299","priceCurrency":"TWD"}}
+</script></head><body></body></html>"#;
+
+#[test]
+fn test_plain_product_has_no_group_id() {
+    // The product exists...
+    assert_eq!(count(PLAIN_PRODUCT_NO_GROUP, "MATCH (p:Product) RETURN p.name"), 1);
+    // ...but carries no product_group_id (prop absent → filtered out).
+    assert_eq!(
+        count(
+            PLAIN_PRODUCT_NO_GROUP,
+            "MATCH (p:Product) WHERE p.product_group_id = 'SOLO-1' RETURN p.name"
+        ),
+        0
     );
 }
 
