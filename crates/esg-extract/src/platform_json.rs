@@ -19,16 +19,35 @@ use serde_json::Value;
 /// Candidate keys for the inline product array, in priority order. `products`
 /// is the dominant Shopify-compatible name; the rest cover stores that relabel
 /// it. Tried in order — the first that parses as a NON-EMPTY array wins, so a
-/// broader name like `items` only acts as a fallback and never shadows
+/// broader name like `goods` only acts as a fallback and never shadows
 /// `products` on a page that has both.
-const PRODUCT_ARRAY_KEYS: [&str; 4] = ["\"products\"", "\"productList\"", "\"goods\"", "\"items\""];
+///
+/// `"items"` was deliberately dropped: it is too generic and false-positively
+/// matched non-product arrays on real stores — cyberbiz inlines a
+/// `product_labels.items` config array (`{"kind":"system","title":"特價標籤"}`)
+/// and shopline a `filter_tag` `items` array (`{"content_translations":…,"count":8}`),
+/// either of which preempted the real products. No verified store uses `items`
+/// as the genuine product array.
+const PRODUCT_ARRAY_KEYS: [&str; 3] = ["\"products\"", "\"productList\"", "\"goods\""];
 
 /// Find and parse the first balanced product array in the page, trying each
-/// candidate key in priority order. Returns the parsed array, or None.
+/// candidate key in priority order. Returns the first array that both parses
+/// and looks like products, or None.
 pub fn find_products_array(html: &str) -> Option<Vec<Value>> {
-    PRODUCT_ARRAY_KEYS
-        .iter()
-        .find_map(|key| parse_array_after_key(html, key).filter(|a| !a.is_empty()))
+    PRODUCT_ARRAY_KEYS.iter().find_map(|key| {
+        parse_array_after_key(html, key).filter(|a| !a.is_empty() && looks_like_product_array(a))
+    })
+}
+
+/// Reject an array that parses but is plainly NOT products — a config / label
+/// array that happened to sit under a matching key. The discriminator is the
+/// `kind` field cyberbiz stamps on label definitions (`"kind":"system"` /
+/// `"custom"`), never present on a real product. Belt-and-suspenders alongside
+/// dropping the `items` key: defends `products`/`goods` against the same class
+/// of false positive without needing to know every relabelled key.
+fn looks_like_product_array(arr: &[Value]) -> bool {
+    !arr.iter()
+        .all(|v| v.get("kind").and_then(Value::as_str).is_some())
 }
 
 /// Parse the first balanced `[ ... ]` array following `key` in `html`.

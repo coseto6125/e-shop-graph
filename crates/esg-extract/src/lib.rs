@@ -25,7 +25,13 @@ enum PageExtract {
     /// Layer 1: platform `"products":[...]` array (richest; doni/cyberbiz).
     Platform(Vec<Value>),
     /// Layer 2: products embedded in `ga-product='{}'` DOM attributes (shopline).
-    DomAttr(Vec<Value>),
+    /// The second field carries any `@type:Product` JSON-LD objects found on the
+    /// SAME page: on a shopline DETAIL page the `ga-product` attrs are
+    /// recommendation-widget products (id/sku/title, no price/image) while the
+    /// page's true subject lives ONLY in JSON-LD — so we ingest both, and
+    /// upsert-by-id merges where they overlap. Empty on listing pages (ga is the
+    /// rich source there; nothing to augment).
+    DomAttr(Vec<Value>, Vec<Value>),
     /// Next.js `__NEXT_DATA__` product-like arrays (SSR / post-render).
     NextData(Vec<Value>),
     /// schema.org microdata (itemprop) — 91app SSR product pages.
@@ -107,14 +113,27 @@ fn collect_objects(val: Value, out: &mut Vec<Value>) {
 /// touching the DOM or the price scale; the scale (a full visible-text scan)
 /// is built only once a source actually yields products. The DOM-based
 /// fallbacks (microdata, JSON-LD) share a single `Html::parse_document`.
-fn extract_page(html: &str) -> (PageExtract, price::PriceScale, Option<String>) {
+fn extract_page(html: &str) -> (PageExtract, price::PriceScale, PageMeta) {
     // Page origin (scheme://host) from og:url, shared across every extractor so
     // relative product/image URLs become absolute. Read straight from the HTML
     // (a meta tag) rather than parsing the DOM, so the JSON-only platform path
     // pays nothing extra. None when the page has no og:url — absolutize() then
     // leaves relative URLs as-is (better a relative URL than a wrong host).
     let origin = page_og_origin(html);
-    let with_scale = |page| (page, price::PriceScale::from_html(html), origin.clone());
+    // `canonical` is only consumed by the JSON-LD-bearing paths (DomAttr augment
+    // + JsonLd), so it's computed inline in those two arms — the platform_json /
+    // next_data / microdata arms never pay the page scan. `with_scale` defaults
+    // canonical to None; the two arms that need it build PageMeta directly.
+    let with_scale = |page| {
+        (
+            page,
+            price::PriceScale::from_html(html),
+            PageMeta {
+                origin: origin.clone(),
+                canonical: None,
+            },
+        )
+    };
 
     if let Some(products) = platform_json::find_products_array(html) {
         if !products.is_empty() {
@@ -123,7 +142,18 @@ fn extract_page(html: &str) -> (PageExtract, price::PriceScale, Option<String>) 
     }
     let ga = dom_attr::find_ga_products(html);
     if !ga.is_empty() {
-        return with_scale(PageExtract::DomAttr(ga));
+        // A shopline DETAIL page's `ga-product` attrs are recommendation
+        // products; the page subject (with price + image) is in the JSON-LD
+        // Product block only. Carry those JSON-LD products so ingest folds both.
+        let ld_products = jsonld_product_objects(&Html::parse_document(html));
+        let canonical = (!ld_products.is_empty())
+            .then(|| page_canonical_url(html))
+            .flatten();
+        return (
+            PageExtract::DomAttr(ga, ld_products),
+            price::PriceScale::from_html(html),
+            PageMeta { origin, canonical },
+        );
     }
     if let Some(nd) = next_data::find_next_data(html) {
         let products = next_data::collect_product_arrays(&nd);
@@ -140,9 +170,84 @@ fn extract_page(html: &str) -> (PageExtract, price::PriceScale, Option<String>) 
     }
     let ld = jsonld_from_dom(&doc);
     if !ld.objects.is_empty() {
-        return with_scale(PageExtract::JsonLd(ld.objects));
+        let canonical = page_canonical_url(html);
+        return (
+            PageExtract::JsonLd(ld.objects),
+            price::PriceScale::from_html(html),
+            PageMeta { origin, canonical },
+        );
     }
-    (PageExtract::Empty, price::PriceScale::empty(), origin)
+    (
+        PageExtract::Empty,
+        price::PriceScale::empty(),
+        PageMeta {
+            origin,
+            canonical: None,
+        },
+    )
+}
+
+/// Page-level signals shared across extractors: the og:url `origin`
+/// (scheme://host, for absolutizing relative URLs) and the `<link rel=canonical>`
+/// product URL (surfaced as `Product.url` when a JSON-LD product omits its own).
+struct PageMeta {
+    origin: Option<String>,
+    canonical: Option<String>,
+}
+
+/// JSON-LD objects on a parsed DOM that are `@type:Product` — the subset the
+/// DomAttr augmentation re-ingests for a detail page's true subject.
+fn jsonld_product_objects(doc: &Html) -> Vec<Value> {
+    jsonld_from_dom(doc)
+        .objects
+        .into_iter()
+        .filter(is_product_object)
+        .collect()
+}
+
+/// `@type` is `Product` (string) or an array containing `"Product"`.
+fn is_product_object(obj: &Value) -> bool {
+    match obj.get("@type") {
+        Some(Value::String(s)) => s == "Product",
+        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("Product")),
+        _ => false,
+    }
+}
+
+/// Extract the `<link rel="canonical" href="…">` product URL — a cheap
+/// substring scan (no DOM build for the JSON-only path). None when absent.
+/// This is the page's own declared canonical, used as `Product.url` when the
+/// structured data omits a url.
+fn page_canonical_url(html: &str) -> Option<String> {
+    // Find a <link …rel="canonical"…> tag, then its href. rel and href can
+    // appear in either order, so locate the tag first then scan within it.
+    let mut search = html;
+    while let Some(rel_pos) = search
+        .find("rel=\"canonical\"")
+        .or_else(|| search.find("rel='canonical'"))
+    {
+        // Bound the tag: back to the nearest '<', forward to the next '>'.
+        let tag_start = search[..rel_pos].rfind('<').unwrap_or(0);
+        let tag_end = search[rel_pos..]
+            .find('>')
+            .map(|e| rel_pos + e)
+            .unwrap_or(search.len());
+        let tag = &search[tag_start..tag_end];
+        if let Some(href_pos) = tag.find("href=") {
+            let after = &tag[href_pos + "href=".len()..];
+            if let Some(quote) = after.chars().next().filter(|c| *c == '"' || *c == '\'') {
+                let val = &after[1..];
+                if let Some(end) = val.find(quote) {
+                    let url = val[..end].trim();
+                    if url.starts_with("http") {
+                        return Some(url.to_string());
+                    }
+                }
+            }
+        }
+        search = &search[tag_end..];
+    }
+    None
 }
 
 /// Extract the page origin (`scheme://host`) from the `og:url` meta tag without
@@ -167,17 +272,29 @@ fn ingest_into(
     builder: &mut GraphBuilder,
     page: &PageExtract,
     scale: &price::PriceScale,
-    origin: Option<&str>,
+    meta: &PageMeta,
 ) {
+    let origin = meta.origin.as_deref();
     match page {
         PageExtract::Platform(products) => {
             for p in products {
                 platform_json::ingest_product(builder, p, scale, origin);
             }
         }
-        PageExtract::DomAttr(products) => {
+        PageExtract::DomAttr(products, ld_products) => {
             for p in products {
                 dom_attr::ingest_ga_product(builder, p, scale);
+            }
+            // Detail-page subject: ga carried only recommendation products, so
+            // fold the JSON-LD Product(s) too (price + image live there). Stamp
+            // the page canonical only when there's a single JSON-LD subject — a
+            // detail page — so a multi-product JSON-LD block isn't mis-attributed
+            // one shared url.
+            let canonical = (ld_products.len() == 1)
+                .then_some(meta.canonical.as_deref())
+                .flatten();
+            for obj in ld_products {
+                ingest_object(builder, obj, scale, canonical);
             }
         }
         PageExtract::NextData(products) => {
@@ -189,8 +306,12 @@ fn ingest_into(
             microdata::ingest_microdata(builder, products, scale);
         }
         PageExtract::JsonLd(objects) => {
+            // Stamp the canonical only for a single-subject (detail) page.
+            let canonical = (objects.iter().filter(|o| is_product_object(o)).count() == 1)
+                .then_some(meta.canonical.as_deref())
+                .flatten();
             for obj in objects {
-                ingest_object(builder, obj, scale);
+                ingest_object(builder, obj, scale, canonical);
             }
         }
         PageExtract::Empty => {}
@@ -213,10 +334,10 @@ pub fn build_from_pages(pages: &[String]) -> Result<GraphBuilder> {
 /// is parallel (rayon); the ingest fold is serial because the builder is one
 /// shared mutable structure.
 pub fn ingest_pages_into(builder: &mut GraphBuilder, pages: &[String]) {
-    let per_page: Vec<(PageExtract, price::PriceScale, Option<String>)> =
+    let per_page: Vec<(PageExtract, price::PriceScale, PageMeta)> =
         pages.par_iter().map(|html| extract_page(html)).collect();
-    for (page, scale, origin) in &per_page {
-        ingest_into(builder, page, scale, origin.as_deref());
+    for (page, scale, meta) in &per_page {
+        ingest_into(builder, page, scale, meta);
     }
 }
 
@@ -247,8 +368,8 @@ pub fn build_from_files(paths: &[std::path::PathBuf]) -> Result<GraphBuilder> {
         // HTML may not be valid UTF-8 in the strict sense; lossy is fine for
         // extraction (we only read ASCII-structured JSON/attrs + text).
         let html = String::from_utf8_lossy(&mmap);
-        let (page, scale, origin) = extract_page(&html);
-        ingest_into(&mut builder, &page, &scale, origin.as_deref());
+        let (page, scale, meta) = extract_page(&html);
+        ingest_into(&mut builder, &page, &scale, &meta);
         // mmap dropped here → page memory released before the next file.
     }
     Ok(builder)
@@ -267,16 +388,13 @@ fn tracing_warn(path: &std::path::Path, e: &std::io::Error) {
 /// `price_confident` schema, so cross-source Cypher
 /// (`WHERE p.price = "4200"` or string-prefix matches) hits every product
 /// regardless of how the page surfaced it.
-fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
-    // `@type` is usually a string but schema.org permits an array of types
-    // (e.g. `["Product","IndividualProduct"]`); accept either as long as
-    // "Product" is present.
-    let is_product = match obj.get("@type") {
-        Some(Value::String(s)) => s == "Product",
-        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("Product")),
-        _ => false,
-    };
-    if !is_product {
+fn ingest_object(
+    b: &mut GraphBuilder,
+    obj: &Value,
+    scale: &price::PriceScale,
+    page_url: Option<&str>,
+) {
+    if !is_product_object(obj) {
         return;
     }
     let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
@@ -313,7 +431,11 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
     let offer_obj = obj
         .get("offers")
         .and_then(|o| if o.is_array() { o.get(0) } else { Some(o) });
-    let offer_price = offer_obj.and_then(|o| o.get("price"));
+    // `Offer` carries a scalar `price`; `AggregateOffer` (a price band over
+    // variants — meepshop and other multi-variant stores) carries no `price`,
+    // only `lowPrice`/`highPrice`. Fall back to `lowPrice` so the Product node
+    // gets the band's floor as its price rather than nothing.
+    let offer_price = offer_obj.and_then(|o| o.get("price").or_else(|| o.get("lowPrice")));
     // Start from the normalized-price Map directly (no serialize→parse round
     // trip) and inline scalar props onto the Product so single-node Cypher
     // works without a hop: offer availability/condition/validity/seller, the
@@ -358,6 +480,24 @@ fn ingest_object(b: &mut GraphBuilder, obj: &Value, scale: &price::PriceScale) {
         {
             pm.insert("review_count".into(), c.clone());
         }
+    }
+    // Surface a single `image` from the JSON-LD `image` field (a CDN string, an
+    // `{img_url|src|url}` object, or — the schema.org norm — an array of URL
+    // strings), mirroring what platform_json::ingest_product does for the inline
+    // JSON path. Without this a JSON-LD-only product (shopline detail pages,
+    // meepshop) reached the graph thumbnail-less. JSON-LD images are absolute CDN
+    // URLs, so no page origin is threaded in here.
+    if let Some(img) = normalize::extract_image(obj) {
+        pm.insert("image".into(), normalize::absolutize_url(&img, None).into());
+    }
+    // When the JSON-LD product carries no `url` of its own, fall back to the
+    // page's `<link rel=canonical>` — a real product URL (a LINE carousel uri)
+    // instead of the opaque sku/@id the identity logic falls back to. Only the
+    // page subject reaches here with a canonical (caller gates it to single-
+    // product detail pages), so a recommendation product never inherits it.
+    if let Some(url) = page_url {
+        pm.entry("url".to_string())
+            .or_insert_with(|| url.to_string().into());
     }
     let props = Value::Object(pm).to_string();
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &props);

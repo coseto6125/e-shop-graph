@@ -55,10 +55,10 @@ pub fn url_origin(url: &str) -> Option<String> {
 
 /// Pull a usable image URL out of a source product object, trying the shapes
 /// storefronts actually emit, in priority order:
-///   `featured_image.img_url` / `.src` → `image` (string or `{img_url|src}`)
-///   → first of `images[]` (string or object). Returns the raw value; the
-/// caller absolutizes it (CDN URLs are usually already absolute, but a
-/// store-relative `/i/x.jpg` shouldn't slip through).
+///   `featured_image.img_url` / `.src` → `image` (string, `{img_url|src}`, or
+///   an `[url, …]` array) → first of `images[]` (string or object). Returns the
+/// raw value; the caller absolutizes it (CDN URLs are usually already absolute,
+/// but a store-relative `/i/x.jpg` shouldn't slip through).
 pub fn extract_image(obj: &Value) -> Option<String> {
     fn from_image_node(node: &Value) -> Option<String> {
         match node {
@@ -70,6 +70,11 @@ pub fn extract_image(obj: &Value) -> Option<String> {
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
                 .map(str::to_string),
+            // schema.org JSON-LD ships `image` as an array of URL strings
+            // (`"image":["https://…jpg",…]`); take the first that resolves, so
+            // the singular `image` key resolves an array the same way the
+            // plural `images` branch does.
+            Value::Array(a) => a.iter().find_map(from_image_node),
             _ => None,
         }
     }
@@ -126,5 +131,17 @@ mod tests {
     #[test]
     fn image_none_when_absent() {
         assert_eq!(extract_image(&json!({"name": "x"})), None);
+    }
+
+    #[test]
+    fn image_from_singular_image_string_array() {
+        // schema.org JSON-LD shape: "image":["https://…a.jpg","https://…b.png"]
+        let obj = json!({"image": ["https://cdn/a.jpg", "https://cdn/b.png"]});
+        assert_eq!(extract_image(&obj).as_deref(), Some("https://cdn/a.jpg"));
+    }
+
+    #[test]
+    fn image_empty_array_is_none() {
+        assert_eq!(extract_image(&json!({"image": []})), None);
     }
 }
