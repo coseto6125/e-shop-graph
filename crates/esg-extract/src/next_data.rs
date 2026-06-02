@@ -26,6 +26,11 @@ pub fn collect_product_arrays(root: &Value) -> Vec<Value> {
     found
 }
 
+/// Keys whose value, when a dict-of-products (productId-keyed map, e.g. Portaly's
+/// `products: {"xgz…": {...}}`), should be collected as products — scoped so an
+/// arbitrary id-keyed map elsewhere in the tree isn't slurped.
+const PRODUCTS_DICT_KEYS: [&str; 3] = ["products", "productList", "goods"];
+
 fn walk(v: &Value, out: &mut Vec<Value>) {
     match v {
         Value::Array(arr) => {
@@ -35,7 +40,24 @@ fn walk(v: &Value, out: &mut Vec<Value>) {
                 arr.iter().for_each(|e| walk(e, out));
             }
         }
-        Value::Object(map) => map.values().for_each(|e| walk(e, out)),
+        Value::Object(map) => {
+            for (k, child) in map {
+                // A products-keyed DICT (productId → product object) is the
+                // dict-shaped twin of the array branch above (Portaly mints
+                // `products` as a map, not a list). Collect its values when the
+                // KEY is a known products key AND every value is product-like;
+                // otherwise recurse as normal so nothing else is mis-slurped.
+                if PRODUCTS_DICT_KEYS.contains(&k.as_str()) {
+                    if let Value::Object(dict) = child {
+                        if !dict.is_empty() && dict.values().all(is_product_like) {
+                            out.extend(dict.values().cloned());
+                            continue;
+                        }
+                    }
+                }
+                walk(child, out);
+            }
+        }
         _ => {}
     }
 }

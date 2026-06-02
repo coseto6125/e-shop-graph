@@ -8,6 +8,7 @@
 //!   5. schema.org JSON-LD (`@type: Product`)
 
 pub mod dom_attr;
+pub mod hypernova;
 pub mod microdata;
 pub mod next_data;
 pub mod normalize;
@@ -38,6 +39,9 @@ enum PageExtract {
     Microdata(Vec<microdata::MicrodataProduct>),
     /// schema.org JSON-LD objects.
     JsonLd(Vec<Value>),
+    /// Hypernova "SUPER LANDING" one-page store: product objects + the page
+    /// canonical url (every product links to the single landing page).
+    Hypernova(Vec<Value>, String),
     /// Nothing structured found.
     Empty,
 }
@@ -135,6 +139,49 @@ fn extract_page(html: &str) -> (PageExtract, price::PriceScale, PageMeta) {
         )
     };
 
+    // Source 0 (HIGHEST priority): clean JSON-LD Product / ProductGroup.
+    // A page's `@type:Product` JSON-LD is the page subject's own structured
+    // data — its name/price/image/sku, authored by the platform — so when it is
+    // present and clean it must win over the lower sources that, on a detail
+    // page, mis-fire on adjacent data (next_data.productList minting an empty
+    // node, a BreadcrumbList microdata crumb, a GA category name). Gated behind
+    // a cheap substring pre-check so a page WITHOUT json-ld (doni: 0 json-ld)
+    // never pays the Html::parse_document tax and routes to platform_json /
+    // microdata bit-identically to before.
+    if html.contains("application/ld+json") {
+        let ld = jsonld_from_dom(&Html::parse_document(html)).objects;
+        let clean: Vec<Value> = ld.into_iter().filter(is_clean_product_ld).collect();
+        if !clean.is_empty() {
+            let canonical = page_canonical_url(html);
+            return (
+                PageExtract::JsonLd(clean),
+                price::PriceScale::from_html(html),
+                PageMeta { origin, canonical },
+            );
+        }
+    }
+
+    // Hypernova ("SUPER LANDING" one-page stores): the products array lives in a
+    // keyed <script> whose body is an HTML COMMENT. Checked BEFORE platform_json
+    // because platform_json's raw `"products":[` substring scan reaches INTO the
+    // comment and would grab the array without the per-page canonical url that
+    // ingest_hypernova stamps. Gated on the cheap `data-hypernova-key` substring
+    // so non-Hypernova pages skip the scan.
+    if html.contains("data-hypernova-key") {
+        if let Some((products, canonical)) = hypernova::find_hypernova(html) {
+            if !products.is_empty() {
+                return (
+                    PageExtract::Hypernova(products, canonical),
+                    price::PriceScale::from_html(html),
+                    PageMeta {
+                        origin,
+                        canonical: None,
+                    },
+                );
+            }
+        }
+    }
+
     if let Some(products) = platform_json::find_products_array(html) {
         if !products.is_empty() {
             return with_scale(PageExtract::Platform(products));
@@ -207,11 +254,62 @@ fn jsonld_product_objects(doc: &Html) -> Vec<Value> {
 
 /// `@type` is `Product` (string) or an array containing `"Product"`.
 fn is_product_object(obj: &Value) -> bool {
+    type_is(obj, "Product")
+}
+
+/// `@type` is `ProductGroup` (string) or an array containing `"ProductGroup"`.
+/// A ProductGroup carries no price/image of its own; its sellable products live
+/// under `hasVariant[]` (Shopify variant model), each a full `@type:Product`.
+fn is_product_group(obj: &Value) -> bool {
+    type_is(obj, "ProductGroup")
+}
+
+/// `@type` equals `want` as a bare string, or as a member of a `@type` array.
+fn type_is(obj: &Value, want: &str) -> bool {
     match obj.get("@type") {
-        Some(Value::String(s)) => s == "Product",
-        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("Product")),
+        Some(Value::String(s)) => s == want,
+        Some(Value::Array(types)) => types.iter().any(|t| t.as_str() == Some(want)),
         _ => false,
     }
+}
+
+/// A JSON-LD object that genuinely identifies a product: a Product (or a
+/// ProductGroup with ≥1 clean variant) whose extracted prop map passes
+/// `has_product_signal` (price / image / sku / gtin / mpn / `/products/` url).
+/// A BreadcrumbList, a `WebPage`, or an empty `{@type:Product}` block fails
+/// here, so the early JSON-LD-first arm only short-circuits when there is a
+/// REAL product subject — otherwise the page falls through to the existing
+/// source chain (microdata, etc.) exactly as before.
+fn is_clean_product_ld(obj: &Value) -> bool {
+    if is_product_group(obj) {
+        return product_group_variants(obj).any(is_clean_product_ld);
+    }
+    if !is_product_object(obj) {
+        return false;
+    }
+    // Build the SAME price/image signal view `ingest_object` would, cheaply:
+    // a no-signal PriceScale (the reject path needs no visible-text scan — none
+    // of the has_product_signal keys depend on the scale) plus the image probe.
+    let offer_obj = obj
+        .get("offers")
+        .and_then(|o| if o.is_array() { o.get(0) } else { Some(o) });
+    let offer_price = offer_obj.and_then(|o| o.get("price").or_else(|| o.get("lowPrice")));
+    let mut pm = platform_json::normalized_price_map(obj, offer_price, &price::PriceScale::empty(), None);
+    if let Some(img) = normalize::extract_image(obj) {
+        pm.insert("image".into(), img.into());
+    }
+    has_product_signal(&pm)
+}
+
+/// A ProductGroup's `hasVariant` children as a slice iterator — handles both the
+/// array form (the common case) and a single-object form. Empty when absent.
+fn product_group_variants(obj: &Value) -> impl Iterator<Item = &Value> {
+    match obj.get("hasVariant") {
+        Some(Value::Array(arr)) => arr.as_slice(),
+        Some(one) => std::slice::from_ref(one),
+        None => &[],
+    }
+    .iter()
 }
 
 /// Extract the `<link rel="canonical" href="…">` product URL — a cheap
@@ -314,6 +412,9 @@ fn ingest_into(
                 ingest_object(builder, obj, scale, canonical);
             }
         }
+        PageExtract::Hypernova(products, canonical) => {
+            hypernova::ingest_hypernova(builder, products, scale, canonical, origin);
+        }
         PageExtract::Empty => {}
     }
 }
@@ -334,11 +435,37 @@ pub fn build_from_pages(pages: &[String]) -> Result<GraphBuilder> {
 /// is parallel (rayon); the ingest fold is serial because the builder is one
 /// shared mutable structure.
 pub fn ingest_pages_into(builder: &mut GraphBuilder, pages: &[String]) {
-    let per_page: Vec<(PageExtract, price::PriceScale, PageMeta)> =
-        pages.par_iter().map(|html| extract_page(html)).collect();
+    let per_page: Vec<(PageExtract, price::PriceScale, PageMeta)> = pages
+        .par_iter()
+        .enumerate()
+        .map(|(i, html)| extract_page_isolated(html, i))
+        .collect();
     for (page, scale, meta) in &per_page {
         ingest_into(builder, page, scale, meta);
     }
+}
+
+/// `extract_page` with a panic firewall: a single poison page (a malformed JSON
+/// depth, a future serde stack overflow, a substring slice on a non-char
+/// boundary) degrades to an empty extract instead of unwinding out of the rayon
+/// `collect()` and aborting the ENTIRE build (which discarded every good page —
+/// the 64-byte-graph failure mode). `&str` is unwind-safe; the closure captures
+/// nothing mutable, so `AssertUnwindSafe` is sound. The caught panic is logged
+/// with the page index so a systematic failure stays visible in build logs.
+fn extract_page_isolated(html: &str, idx: usize) -> (PageExtract, price::PriceScale, PageMeta) {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_page(html))).unwrap_or_else(
+        |_| {
+            eprintln!("esg: extract panicked on page index {idx}; skipping");
+            (
+                PageExtract::Empty,
+                price::PriceScale::empty(),
+                PageMeta {
+                    origin: None,
+                    canonical: None,
+                },
+            )
+        },
+    )
 }
 
 /// Memory-bounded build: mmap each HTML file in `paths` one at a time, extract,
@@ -368,7 +495,21 @@ pub fn build_from_files(paths: &[std::path::PathBuf]) -> Result<GraphBuilder> {
         // HTML may not be valid UTF-8 in the strict sense; lossy is fine for
         // extraction (we only read ASCII-structured JSON/attrs + text).
         let html = String::from_utf8_lossy(&mmap);
-        let (page, scale, meta) = extract_page(&html);
+        // Same panic firewall as the parallel path: a single poison file is
+        // skipped (logged with its path), never fatal to the whole crawl.
+        let (page, scale, meta) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| extract_page(&html)))
+                .unwrap_or_else(|_| {
+                    eprintln!("esg: extract panicked on {path:?}; skipping");
+                    (
+                        PageExtract::Empty,
+                        price::PriceScale::empty(),
+                        PageMeta {
+                            origin: None,
+                            canonical: None,
+                        },
+                    )
+                });
         ingest_into(&mut builder, &page, &scale, &meta);
         // mmap dropped here → page memory released before the next file.
     }
@@ -420,6 +561,19 @@ fn ingest_object(
     scale: &price::PriceScale,
     page_url: Option<&str>,
 ) {
+    // ProductGroup (Shopify variant model): the group carries no price/image of
+    // its own — its sellable products live under `hasVariant[]`, each a full
+    // `@type:Product` with its own sku/image/offers.price. Emit one Product per
+    // variant (distinct sku/@id ⇒ distinct nodes; per-variant price/stock/image
+    // would be lost by merging). A parent Product node would fail the signal
+    // gate and orphan the variants, so per-variant Product is the only shape
+    // that survives the gate.
+    if is_product_group(obj) {
+        for v in product_group_variants(obj) {
+            ingest_object(b, v, scale, page_url);
+        }
+        return;
+    }
     if !is_product_object(obj) {
         return;
     }
@@ -524,6 +678,18 @@ fn ingest_object(
             "images".into(),
             Value::Array(images.into_iter().map(Value::String).collect()),
         );
+    }
+    // A ProductGroup variant carries no top-level `url`; its link lives on the
+    // offer (`offers.url` — Shopify's per-variant product URL). Fall back to it
+    // before the page canonical so each variant card is independently clickable
+    // (the canonical, gated to single-subject pages, never reaches a variant).
+    if let Some(offer_url) = offer_obj
+        .and_then(|o| o.get("url"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        pm.entry("url".to_string())
+            .or_insert_with(|| offer_url.to_string().into());
     }
     // When the JSON-LD product carries no `url` of its own, fall back to the
     // page's `<link rel=canonical>` — a real product URL (a LINE carousel uri)

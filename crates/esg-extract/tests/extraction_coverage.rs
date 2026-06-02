@@ -131,10 +131,16 @@ const SHOPLINE_DETAIL: &str = r#"<!doctype html><html><head>
 </body></html>"#;
 
 #[test]
-fn shopline_detail_subject_captured_via_jsonld_augment() {
-    // ga recommendation products + the JSON-LD subject all present.
-    assert!(count(SHOPLINE_DETAIL, "MATCH (p:Product) RETURN p.name") >= 3);
-    // The subject (JSON-LD only) carries price + image + canonical url.
+fn shopline_detail_subject_captured_via_jsonld_first() {
+    // SHOPLINE detail pages carry a clean JSON-LD Product (the page subject),
+    // so the JSON-LD-first arm now wins and short-circuits BEFORE dom_attr —
+    // the page's own subject is captured directly from its structured data,
+    // with full price/image/url parity. The `ga-product` divs on a DETAIL page
+    // are recommendation-widget products (no price/image of their own); they're
+    // legitimately captured on their OWN detail/listing pages, so the subject
+    // being the single Product here is correct, not a regression.
+    assert_eq!(count(SHOPLINE_DETAIL, "MATCH (p:Product) RETURN p.name"), 1);
+    // The subject (JSON-LD) carries price + image + canonical url.
     let q = "MATCH (p:Product) WHERE p.name = '馬栗樹賦活護髮素' RETURN ";
     assert_eq!(
         one_str(SHOPLINE_DETAIL, &format!("{q}p.price")).as_deref(),
@@ -237,4 +243,226 @@ fn multi_image_gallery_captured() {
         }
         other => panic!("expected images list, got {other:?}"),
     }
+}
+
+// ── JSON-LD-first reorder (meepShop): a detail page has BOTH a clean JSON-LD
+// Product AND a __NEXT_DATA__ productList. Pre-fix, next_data (layer 3) fired
+// first and minted an EMPTY node (name="", price=null). JSON-LD-first now wins,
+// so the product carries its real name + price. ──────────────────────────────
+const MEEPSHOP_NEXTDATA_AND_LD: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://store.meepshop.me/p/dress">
+<link rel="canonical" href="https://store.meepshop.me/p/dress">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"棉質休閒洋裝",
+ "image":"https://img.meepshop.me/d.jpg",
+ "offers":{"@type":"Offer","price":"359","priceCurrency":"TWD"}}
+</script>
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"productList":[{"id":"x1","name":"","price":null}]}}}
+</script></head><body><p>NT$359</p></body></html>"#;
+
+#[test]
+fn test_meepshop_jsonld_first_wins_over_nextdata() {
+    // Exactly one Product — the next_data empty node never gets a chance.
+    assert_eq!(count(MEEPSHOP_NEXTDATA_AND_LD, "MATCH (p:Product) RETURN p.name"), 1);
+    assert_eq!(
+        one_str(MEEPSHOP_NEXTDATA_AND_LD, "MATCH (p:Product) RETURN p.name").as_deref(),
+        Some("棉質休閒洋裝")
+    );
+    assert_eq!(
+        one_str(MEEPSHOP_NEXTDATA_AND_LD, "MATCH (p:Product) RETURN p.price").as_deref(),
+        Some("359")
+    );
+}
+
+// ── JSON-LD-first cleanliness gate (Cyberbiz/WACA): a page whose FIRST JSON-LD
+// object is a BreadcrumbList (a "首頁"/Home crumb) plus microdata that would
+// mis-fire on the crumb. is_clean_product_ld rejects the BreadcrumbList, so the
+// real clean Product wins — the product name is NOT the crumb. ────────────────
+const BREADCRUMB_PLUS_PRODUCT_LD: &str = r#"<!doctype html><html><head>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[
+ {"@type":"ListItem","position":1,"name":"首頁","item":"https://shop/"}]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"真正的洋裝",
+ "image":"https://cdn/dress.jpg",
+ "offers":{"@type":"Offer","price":"600","priceCurrency":"TWD"}}
+</script></head>
+<body itemscope itemtype="https://schema.org/BreadcrumbList">
+ <span itemprop="name">首頁</span>
+</body></html>"#;
+
+#[test]
+fn test_cyberbiz_breadcrumb_only_ld_does_not_win_falls_to_real_product() {
+    // The crumb never becomes a Product.
+    assert_eq!(
+        count(
+            BREADCRUMB_PLUS_PRODUCT_LD,
+            "MATCH (p:Product) WHERE p.name = '首頁' RETURN p.name"
+        ),
+        0
+    );
+    // The real product is captured with its price.
+    assert_eq!(
+        one_str(BREADCRUMB_PLUS_PRODUCT_LD, "MATCH (p:Product) RETURN p.name").as_deref(),
+        Some("真正的洋裝")
+    );
+    assert_eq!(
+        one_str(BREADCRUMB_PLUS_PRODUCT_LD, "MATCH (p:Product) RETURN p.price").as_deref(),
+        Some("600")
+    );
+}
+
+// ── ProductGroup.hasVariant descent (Shopify): top-level @type is ProductGroup
+// (no price/image of its own) with real products nested under hasVariant[].
+// Pre-fix esg extracted 0 nodes. Now: one Product per variant, each with its
+// own sku + price + image (incl. an OutOfStock variant). ──────────────────────
+const SHOPIFY_PRODUCT_GROUP: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://jiwudoc.myshopify.com/products/dress">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"ProductGroup","name":"露肩洋裝",
+ "hasVariant":[
+  {"@type":"Product","name":"露肩洋裝 - 紫紅","sku":"QZC007-PNK",
+   "image":"https://cdn/pnk.jpg",
+   "offers":{"@type":"Offer","price":"680.00","priceCurrency":"TWD","availability":"http://schema.org/OutOfStock"}},
+  {"@type":"Product","name":"露肩洋裝 - 白","sku":"QZC007-WHT",
+   "image":"https://cdn/wht.jpg",
+   "offers":{"@type":"Offer","price":"720.00","priceCurrency":"TWD","availability":"http://schema.org/InStock"}},
+  {"@type":"Product","name":"露肩洋裝 - 黑","sku":"QZC007-BLK",
+   "image":"https://cdn/blk.jpg",
+   "offers":{"@type":"Offer","price":"720.00","priceCurrency":"TWD","availability":"http://schema.org/InStock"}}
+ ]}
+</script></head><body></body></html>"#;
+
+#[test]
+fn test_shopify_productgroup_hasvariant_emits_per_variant_products() {
+    // 3 variants -> 3 Products.
+    assert_eq!(count(SHOPIFY_PRODUCT_GROUP, "MATCH (p:Product) RETURN p.name"), 3);
+    // Distinct skus preserved.
+    assert_eq!(
+        count(
+            SHOPIFY_PRODUCT_GROUP,
+            "MATCH (p:Product) WHERE p.sku = 'QZC007-PNK' RETURN p.sku"
+        ),
+        1
+    );
+    // The OutOfStock variant keeps its own price + availability.
+    let q = "MATCH (p:Product) WHERE p.sku = 'QZC007-PNK' RETURN ";
+    assert_eq!(
+        one_str(SHOPIFY_PRODUCT_GROUP, &format!("{q}p.price")).as_deref(),
+        Some("680")
+    );
+    assert_eq!(
+        one_str(SHOPIFY_PRODUCT_GROUP, &format!("{q}p.availability")).as_deref(),
+        Some("OutOfStock")
+    );
+}
+
+// ── Portaly: a __NEXT_DATA__ `products` keyed as a DICT (productId -> object),
+// alongside a clean JSON-LD Product. Pre-fix the dict-shaped products either
+// went unhandled or a parse path nuked the build. Now the clean JSON-LD wins
+// (layer 0) and the build is never empty. ────────────────────────────────────
+const PORTALY_DICT_PRODUCTS: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://portaly.cc/shop/x">
+<link rel="canonical" href="https://portaly.cc/shop/x">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"香氛蠟燭",
+ "image":"https://cdn/candle.jpg",
+ "offers":{"@type":"Offer","price":"990","priceCurrency":"TWD"}}
+</script>
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"data":{"products":{
+ "xgz123":{"id":"xgz123","name":"香氛蠟燭","price":990,"image":"https://cdn/candle.jpg"}}}}}}
+</script></head><body><p>NT$990</p></body></html>"#;
+
+#[test]
+fn test_portaly_dict_products_jsonld_survives_non_empty() {
+    // Build is non-empty (no nuke) and the clean JSON-LD product is present.
+    assert!(count(PORTALY_DICT_PRODUCTS, "MATCH (p:Product) RETURN p.name") >= 1);
+    assert_eq!(
+        one_str(PORTALY_DICT_PRODUCTS, "MATCH (p:Product) RETURN p.price").as_deref(),
+        Some("990")
+    );
+}
+
+// ── Portaly secondary coverage: the dict-keyed products parse path itself,
+// exercised WITHOUT any JSON-LD so the next_data dict branch is the source.
+// A productId-keyed `products` dict must yield products (not be skipped). ─────
+const NEXTDATA_DICT_NO_LD: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://portaly.cc/shop/y">
+<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"data":{"products":{
+ "abc":{"id":"abc","name":"商品甲","price":120},
+ "def":{"id":"def","name":"商品乙","price":340}}}}}}
+</script></head><body><p>NT$120</p><p>NT$340</p></body></html>"#;
+
+#[test]
+fn test_nextdata_dict_keyed_products_are_collected() {
+    assert_eq!(count(NEXTDATA_DICT_NO_LD, "MATCH (p:Product) RETURN p.name"), 2);
+}
+
+// ── SUPER LANDING (Hypernova): products live in a <script
+// data-hypernova-key="landingdesktopApp"> whose body is HTML-comment-wrapped
+// JSON (props.page.products[]). The key also appears on a <div> mount point —
+// only the <script> body must be parsed. Each product: id/title/price/image +
+// imageDesc1..5 gallery; props.page.url is the canonical for every product. ───
+const SUPER_LANDING: &str = r#"<!doctype html><html><head></head><body>
+<div data-hypernova-key="landingdesktopApp"></div>
+<script type="application/json" data-hypernova-key="landingdesktopApp"><!--{"props":{"page":{"url":"https://www.shareco.me/share_perfume","products":[
+ {"id":64095,"title":"極晝香水","price":2180,"originalPrice":0,
+  "image":"https://cdn/super/a.jpg","imageDesc1":"https://cdn/super/a2.jpg","imageDesc2":"https://cdn/super/a3.jpg"},
+ {"id":64096,"title":"極夜香水","price":1980,"originalPrice":0,
+  "image":"https://cdn/super/b.jpg"}
+]}}}--></script>
+</body></html>"#;
+
+#[test]
+fn test_super_landing_hypernova_extracts_products() {
+    // Both products (from props.page.products, not the div mount).
+    assert_eq!(count(SUPER_LANDING, "MATCH (p:Product) RETURN p.name"), 2);
+    // Price + canonical url stamped from props.page.url.
+    let q = "MATCH (p:Product) WHERE p.name = '極晝香水' RETURN ";
+    assert_eq!(
+        one_str(SUPER_LANDING, &format!("{q}p.price")).as_deref(),
+        Some("2180")
+    );
+    assert_eq!(
+        one_str(SUPER_LANDING, &format!("{q}p.url")).as_deref(),
+        Some("https://www.shareco.me/share_perfume")
+    );
+    assert_eq!(
+        one_str(SUPER_LANDING, &format!("{q}p.image")).as_deref(),
+        Some("https://cdn/super/a.jpg")
+    );
+    // Multi-image: image + imageDesc1..5 -> a gallery of >1.
+    let r = rows(SUPER_LANDING, &format!("{q}p.images"));
+    let imgs = r.into_iter().next().and_then(|row| row.into_iter().next());
+    match imgs {
+        Some(Value::List(a)) => assert_eq!(a.len(), 3),
+        other => panic!("expected 3-image gallery, got {other:?}"),
+    }
+}
+
+// ── doni-parity guard: a platform_json-only page with NO JSON-LD must route to
+// platform_json UNCHANGED — the JSON-LD-first arm's substring pre-gate
+// (html.contains("application/ld+json")) is absent, so the early DOM parse is
+// skipped entirely and the product is captured exactly as before. ─────────────
+const PLATFORM_ONLY_NO_LD: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://shop.easy.co/products/tee"></head><body>
+<script>var d={"products":[{"id":7,"title":"純棉上衣","price":"490","url":"/products/tee",
+ "featured_image":{"img_url":"https://cdn/tee.jpg"}}]};</script>
+</body></html>"#;
+
+#[test]
+fn test_doni_platform_json_only_routes_to_platform_unchanged() {
+    assert_eq!(count(PLATFORM_ONLY_NO_LD, "MATCH (p:Product) RETURN p.name"), 1);
+    assert_eq!(
+        one_str(PLATFORM_ONLY_NO_LD, "MATCH (p:Product) RETURN p.price").as_deref(),
+        Some("490")
+    );
+    assert_eq!(
+        one_str(PLATFORM_ONLY_NO_LD, "MATCH (p:Product) RETURN p.image").as_deref(),
+        Some("https://cdn/tee.jpg")
+    );
 }
