@@ -90,15 +90,24 @@ pub fn ingest_hypernova(
 
         // Build the gallery: primary `image` + imageDesc1..5, reusing the shared
         // normalize logic (dedup + junk-filter) via a temp view object.
-        let gallery: Vec<Value> = ["imageDesc1", "imageDesc2", "imageDesc3", "imageDesc4", "imageDesc5"]
-            .iter()
-            .filter_map(|k| obj.get(*k))
-            .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-            .cloned()
-            .collect();
+        let gallery: Vec<Value> = [
+            "imageDesc1",
+            "imageDesc2",
+            "imageDesc3",
+            "imageDesc4",
+            "imageDesc5",
+        ]
+        .iter()
+        .filter_map(|k| obj.get(*k))
+        .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+        .cloned()
+        .collect();
         let view = json!({ "image": obj.get("image"), "images": gallery });
         if let Some(img) = normalize::extract_image(&view) {
-            pm.insert("image".into(), normalize::absolutize_url(&img, origin).into());
+            pm.insert(
+                "image".into(),
+                normalize::absolutize_url(&img, origin).into(),
+            );
         }
         let images = normalize::extract_images(&view);
         if images.len() > 1 {

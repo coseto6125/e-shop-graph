@@ -294,7 +294,8 @@ fn is_clean_product_ld(obj: &Value) -> bool {
         .get("offers")
         .and_then(|o| if o.is_array() { o.get(0) } else { Some(o) });
     let offer_price = offer_obj.and_then(|o| o.get("price").or_else(|| o.get("lowPrice")));
-    let mut pm = platform_json::normalized_price_map(obj, offer_price, &price::PriceScale::empty(), None);
+    let mut pm =
+        platform_json::normalized_price_map(obj, offer_price, &price::PriceScale::empty(), None);
     if let Some(img) = normalize::extract_image(obj) {
         pm.insert("image".into(), img.into());
     }

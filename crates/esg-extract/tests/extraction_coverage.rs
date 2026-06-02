@@ -264,7 +264,10 @@ const MEEPSHOP_NEXTDATA_AND_LD: &str = r#"<!doctype html><html><head>
 #[test]
 fn test_meepshop_jsonld_first_wins_over_nextdata() {
     // Exactly one Product — the next_data empty node never gets a chance.
-    assert_eq!(count(MEEPSHOP_NEXTDATA_AND_LD, "MATCH (p:Product) RETURN p.name"), 1);
+    assert_eq!(
+        count(MEEPSHOP_NEXTDATA_AND_LD, "MATCH (p:Product) RETURN p.name"),
+        1
+    );
     assert_eq!(
         one_str(MEEPSHOP_NEXTDATA_AND_LD, "MATCH (p:Product) RETURN p.name").as_deref(),
         Some("棉質休閒洋裝")
@@ -305,11 +308,19 @@ fn test_cyberbiz_breadcrumb_only_ld_does_not_win_falls_to_real_product() {
     );
     // The real product is captured with its price.
     assert_eq!(
-        one_str(BREADCRUMB_PLUS_PRODUCT_LD, "MATCH (p:Product) RETURN p.name").as_deref(),
+        one_str(
+            BREADCRUMB_PLUS_PRODUCT_LD,
+            "MATCH (p:Product) RETURN p.name"
+        )
+        .as_deref(),
         Some("真正的洋裝")
     );
     assert_eq!(
-        one_str(BREADCRUMB_PLUS_PRODUCT_LD, "MATCH (p:Product) RETURN p.price").as_deref(),
+        one_str(
+            BREADCRUMB_PLUS_PRODUCT_LD,
+            "MATCH (p:Product) RETURN p.price"
+        )
+        .as_deref(),
         Some("600")
     );
 }
@@ -338,7 +349,10 @@ const SHOPIFY_PRODUCT_GROUP: &str = r#"<!doctype html><html><head>
 #[test]
 fn test_shopify_productgroup_hasvariant_emits_per_variant_products() {
     // 3 variants -> 3 Products.
-    assert_eq!(count(SHOPIFY_PRODUCT_GROUP, "MATCH (p:Product) RETURN p.name"), 3);
+    assert_eq!(
+        count(SHOPIFY_PRODUCT_GROUP, "MATCH (p:Product) RETURN p.name"),
+        3
+    );
     // Distinct skus preserved.
     assert_eq!(
         count(
@@ -383,7 +397,10 @@ const PLAIN_PRODUCT_NO_GROUP: &str = r#"<!doctype html><html><head>
 #[test]
 fn test_plain_product_has_no_group_id() {
     // The product exists...
-    assert_eq!(count(PLAIN_PRODUCT_NO_GROUP, "MATCH (p:Product) RETURN p.name"), 1);
+    assert_eq!(
+        count(PLAIN_PRODUCT_NO_GROUP, "MATCH (p:Product) RETURN p.name"),
+        1
+    );
     // ...but carries no product_group_id (prop absent → filtered out).
     assert_eq!(
         count(
@@ -434,7 +451,10 @@ const NEXTDATA_DICT_NO_LD: &str = r#"<!doctype html><html><head>
 
 #[test]
 fn test_nextdata_dict_keyed_products_are_collected() {
-    assert_eq!(count(NEXTDATA_DICT_NO_LD, "MATCH (p:Product) RETURN p.name"), 2);
+    assert_eq!(
+        count(NEXTDATA_DICT_NO_LD, "MATCH (p:Product) RETURN p.name"),
+        2
+    );
 }
 
 // ── SUPER LANDING (Hypernova): products live in a <script
@@ -491,7 +511,10 @@ const PLATFORM_ONLY_NO_LD: &str = r#"<!doctype html><html><head>
 
 #[test]
 fn test_doni_platform_json_only_routes_to_platform_unchanged() {
-    assert_eq!(count(PLATFORM_ONLY_NO_LD, "MATCH (p:Product) RETURN p.name"), 1);
+    assert_eq!(
+        count(PLATFORM_ONLY_NO_LD, "MATCH (p:Product) RETURN p.name"),
+        1
+    );
     assert_eq!(
         one_str(PLATFORM_ONLY_NO_LD, "MATCH (p:Product) RETURN p.price").as_deref(),
         Some("490")
