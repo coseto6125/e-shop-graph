@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.8.3 — drop non-product nodes, capture multi-image galleries
+
+`graph.bin` format is unchanged (VERSION 6). Extraction-side: re-crawl/re-build
+existing graphs to apply. Adds a `List` Cypher value so `RETURN p.images`
+projects an array.
+
+### Added
+- **Multi-image: `p.images`** — the full product gallery (deduped,
+  order-preserving, `featured_image` first), alongside the existing primary
+  `p.image`. Storefronts list ~9 photos/product under `images[]`; only the
+  first reached the graph before. Written only when >1 image (single-image
+  products keep just `p.image`).
+- **Cypher list projection** — `RETURN p.images` now returns a real list
+  (new `Value::List`), surfaced to Python as a `list`. Array-valued props
+  previously projected to `Null`.
+
+### Fixed
+- **Non-product nodes are skipped.** An info / FAQ / blog page mislabelled
+  `@type:Product` (real-world: easy.co `/blogs/news/常見問題`, name="DONI")
+  reached the graph as a price-less, image-less Product, polluting carousel
+  candidates. A multi-signal gate drops a node only when it has NO product
+  signal at all — no price, no image, no sku/gtin/mpn, no `/products/` url, and
+  (platform_json) no variant array. Any single signal keeps it, so a genuine
+  product whose price is JS-rendered survives on its image/url alone. The page
+  text still reaches the bm25/text lane.
+- **Junk images filtered from galleries.** `extract_images` drops obvious
+  chrome (logo/banner/icon/favicon/sprite/placeholder/theme-asset paths, and
+  `.svg`) by URL path — a programmatic guard. The primary defence remains the
+  source: only a product object's own `images[]` is read, where storefront
+  chrome doesn't appear.
+
 ## 0.8.2 — price / image / url extraction across cyberbiz + shopline
 
 `graph.bin` format is unchanged (VERSION 6, old files still load). This is an

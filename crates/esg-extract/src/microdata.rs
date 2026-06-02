@@ -303,6 +303,15 @@ pub fn ingest_microdata(
                 props.insert("description".into(), trimmed.into());
             }
         }
+        // Skip a node with no product signal — same multi-signal gate as the
+        // JSON-LD / platform_json paths. Microdata `itemprop` is the loosest
+        // source (no `itemtype=Product` required), so an easy.co blog/FAQ page
+        // with `itemprop=name/url` but no price and a `/blogs/` url is mistaken
+        // for a product without this; the gate drops it (its text still reaches
+        // the bm25 lane) while keeping any genuinely priced/imaged item.
+        if !crate::has_product_signal(&props) {
+            continue;
+        }
         b.upsert_node(
             NodeKind::Product,
             id,

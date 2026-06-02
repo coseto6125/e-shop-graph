@@ -160,3 +160,81 @@ fn canonical_not_stamped_when_jsonld_has_url() {
         Some("https://nike.example/air-zoom")
     );
 }
+
+// ── Multi-signal gate: a @type:Product block with NO price / image / sku /
+// /products/ url is an info/FAQ page mislabelled as a product (real-world:
+// easy.co /blogs/news/常見問題). It must NOT become a Product node. ───────────
+const FAQ_AS_PRODUCT: &str = r#"<!doctype html><html><head>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"DONI",
+ "url":"https://shop.easy.co/blogs/news/常見問題"}
+</script></head><body><h1>常見問題</h1></body></html>"#;
+
+#[test]
+fn faq_page_mislabelled_product_is_skipped() {
+    assert_eq!(count(FAQ_AS_PRODUCT, "MATCH (p:Product) RETURN p.name"), 0);
+}
+
+// A genuine product whose price is JS-rendered (absent from static HTML) still
+// has an image + a /products/ url — the gate must KEEP it.
+const PRICELESS_REAL_PRODUCT: &str = r#"<!doctype html><html><head>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","name":"純棉上衣",
+ "url":"https://shop.easy.co/products/cotton-tee",
+ "image":"https://cdn/tee.jpg"}
+</script></head><body></body></html>"#;
+
+#[test]
+fn priceless_product_with_image_and_product_url_is_kept() {
+    assert_eq!(
+        count(PRICELESS_REAL_PRODUCT, "MATCH (p:Product) RETURN p.name"),
+        1
+    );
+    assert_eq!(
+        one_str(PRICELESS_REAL_PRODUCT, "MATCH (p:Product) RETURN p.image").as_deref(),
+        Some("https://cdn/tee.jpg")
+    );
+}
+
+// ── Multi-image: a product gallery (images[] of N>1) is captured as `images`,
+// with `image` remaining the primary (first). doni/easy.co ships `images[]` as
+// objects {img_url,…}; JSON-LD ships a singular `image` URL-string array. ─────
+const MULTI_IMAGE_PLATFORM: &str = r#"<!doctype html><html><head>
+<meta property="og:url" content="https://shop.easy.co/products/tee"></head><body>
+<script>var data = {"products":[{"id":42,"title":"純棉上衣","price":"490",
+ "url":"/products/tee",
+ "featured_image":{"img_url":"https://cdn/hero.jpg"},
+ "images":[{"img_url":"https://cdn/hero.jpg"},{"img_url":"https://cdn/back.jpg"},{"img_url":"https://cdn/detail.jpg"}]}]};</script>
+</body></html>"#;
+
+#[test]
+fn multi_image_gallery_captured() {
+    // primary stays the hero
+    assert_eq!(
+        one_str(MULTI_IMAGE_PLATFORM, "MATCH (p:Product) RETURN p.image").as_deref(),
+        Some("https://cdn/hero.jpg")
+    );
+    // images holds the deduped gallery (hero appears once, not twice)
+    let r = rows(MULTI_IMAGE_PLATFORM, "MATCH (p:Product) RETURN p.images");
+    let imgs = r.into_iter().next().and_then(|row| row.into_iter().next());
+    match imgs {
+        Some(Value::List(a)) => {
+            let urls: Vec<&str> = a
+                .iter()
+                .filter_map(|v| match v {
+                    Value::Str(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                urls,
+                vec![
+                    "https://cdn/hero.jpg",
+                    "https://cdn/back.jpg",
+                    "https://cdn/detail.jpg"
+                ]
+            );
+        }
+        other => panic!("expected images list, got {other:?}"),
+    }
+}

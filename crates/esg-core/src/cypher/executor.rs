@@ -577,6 +577,12 @@ fn json_to_value(prop: &str, v: Option<&serde_json::Value>) -> Value {
         Some(serde_json::Value::Number(n)) if n.is_i64() => Value::Int(n.as_i64().unwrap()),
         Some(serde_json::Value::Number(n)) => Value::Float(n.as_f64().unwrap()),
         Some(serde_json::Value::Bool(b)) => Value::Bool(*b),
+        // Array-valued prop (e.g. `p.images`): project each element through the
+        // same scalar rules. A nested object/array element degrades to Null
+        // rather than failing the whole projection.
+        Some(serde_json::Value::Array(a)) => {
+            Value::List(a.iter().map(|e| json_to_value(prop, Some(e))).collect())
+        }
         _ => Value::Null,
     }
 }

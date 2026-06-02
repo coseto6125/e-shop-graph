@@ -379,6 +379,32 @@ fn tracing_warn(path: &std::path::Path, e: &std::io::Error) {
     eprintln!("esg: skip {path:?}: {e}");
 }
 
+/// True when a built props map carries at least one signal that it's a real
+/// product — a price, an image, a product identity key (sku/gtin/mpn), or a
+/// `/products/` URL path. An info / FAQ / blog page mislabelled `@type:Product`
+/// has none of these. Any single signal keeps the node, so a genuine product
+/// whose price is JS-rendered (absent from the static HTML) survives on its
+/// image or url alone — the gate excludes the empty, never the merely partial.
+pub(crate) fn has_product_signal(pm: &serde_json::Map<String, Value>) -> bool {
+    let nonempty = |k: &str| {
+        pm.get(k)
+            .and_then(Value::as_str)
+            .is_some_and(|s| !s.is_empty())
+    };
+    let has_num = |k: &str| pm.get(k).is_some_and(|v| !v.is_null());
+    has_num("price_cents")
+        || nonempty("price")
+        || nonempty("image")
+        || nonempty("sku")
+        || nonempty("gtin")
+        || nonempty("gtin13")
+        || nonempty("mpn")
+        || pm
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|u| u.contains("/products/") || u.contains("/product/"))
+}
+
 /// Map a single schema.org object onto graph nodes + edges. Currently handles
 /// the Product-centric core (Product/Offer/Brand/AggregateRating).
 ///
@@ -490,6 +516,15 @@ fn ingest_object(
     if let Some(img) = normalize::extract_image(obj) {
         pm.insert("image".into(), normalize::absolutize_url(&img, None).into());
     }
+    // Full gallery alongside the primary `image` (same as platform_json), only
+    // when there's more than one photo. JSON-LD images are absolute CDN URLs.
+    let images = normalize::extract_images(obj);
+    if images.len() > 1 {
+        pm.insert(
+            "images".into(),
+            Value::Array(images.into_iter().map(Value::String).collect()),
+        );
+    }
     // When the JSON-LD product carries no `url` of its own, fall back to the
     // page's `<link rel=canonical>` — a real product URL (a LINE carousel uri)
     // instead of the opaque sku/@id the identity logic falls back to. Only the
@@ -498,6 +533,16 @@ fn ingest_object(
     if let Some(url) = page_url {
         pm.entry("url".to_string())
             .or_insert_with(|| url.to_string().into());
+    }
+    // Multi-signal gate: a node with NO product signal at all — no price, no
+    // image, no /products/ url, no sku/handle — is an info/FAQ/blog page that a
+    // `@type:Product` block (or a fallback-to-name id) mislabelled, not a real
+    // product. Skipping it keeps the carousel candidate set clean while the
+    // page's text still reaches the bm25/text lane. Any ONE signal present is
+    // enough to keep it (a real product whose price is JS-rendered still has an
+    // image / a /products/ url), so this never drops a genuine product.
+    if !has_product_signal(&pm) {
+        return;
     }
     let props = Value::Object(pm).to_string();
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &props);

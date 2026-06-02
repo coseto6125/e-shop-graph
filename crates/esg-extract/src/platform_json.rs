@@ -136,6 +136,31 @@ pub fn ingest_product(b: &mut GraphBuilder, p: &Value, scale: &PriceScale, origi
             normalize::absolutize_url(&img, origin).into(),
         );
     }
+    // Full gallery: `image` stays the primary (back-compat); `images` carries
+    // every product photo (absolutized), for detail views / multi-image cards.
+    // Written only when there's more than the single primary, so single-image
+    // products don't grow a redundant 1-element array.
+    let images = normalize::extract_images(p);
+    if images.len() > 1 {
+        let arr: Vec<Value> = images
+            .iter()
+            .map(|u| normalize::absolutize_url(u, origin).into())
+            .collect();
+        props.insert("images".into(), Value::Array(arr));
+    }
+    // Skip a node with no product signal at all — same multi-signal gate as the
+    // JSON-LD path. A variant array / price band counts as a signal even when
+    // the product-level price is absent (the price lives on the variants), so
+    // check the source object's variant shapes before giving up on it.
+    let has_variants = p
+        .get("variants")
+        .or_else(|| p.get("variations"))
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+        || p.get("price_range").is_some();
+    if !has_variants && !crate::has_product_signal(&props) {
+        return;
+    }
     let product_props = Value::Object(props).to_string();
     let product_idx = b.upsert_node(NodeKind::Product, &id, name, &product_props);
 
