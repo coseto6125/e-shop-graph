@@ -64,8 +64,23 @@ pub fn execute(graph: &ArchivedGraph, q: &Query) -> Result<QueryResult, String> 
     // ── ORDER BY ─ sort the bindings BEFORE skip/limit so top-N is correct ───
     // Done before aggregation only handles the non-agg case; aggregate ORDER BY
     // is applied to the projected rows further down.
-    if !q.order_by.is_empty() && !q.return_.iter().any(|ri| ri.agg.is_some()) {
+    let has_agg_order = q.return_.iter().any(|ri| ri.agg.is_some());
+    if !q.order_by.is_empty() && !has_agg_order {
         sort_bindings(graph, &mut bindings, &q.order_by, q, &var_pos)?;
+    } else if q.order_by.is_empty() && !has_agg_order {
+        // Default relevance order: with no explicit ORDER BY, rank by how many
+        // WHERE leaf predicates each binding satisfies (its "overlap"), highest
+        // first, BEFORE skip/limit. A multi-term OR filter — e.g. the chat graph
+        // lane's `name FUZZY 'A' OR name FUZZY 'B'` — otherwise returns rows in
+        // arbitrary seed order, so a row matching BOTH terms (the specific
+        // product the user named) can sit past LIMIT behind dozens of rows that
+        // match only the broad term and get truncated away. Counting satisfied
+        // leaves floats the most-specific match to the top. A stable sort keeps
+        // the original order among equal-overlap rows; an absent/0-overlap WHERE
+        // (e.g. a bare `MATCH … RETURN`) leaves every score 0 → order unchanged.
+        if q.where_.is_some() {
+            sort_by_overlap(graph, &mut bindings, q.where_.as_ref(), &var_pos);
+        }
     }
 
     let columns = q.return_.iter().map(column_name).collect();
@@ -446,6 +461,43 @@ fn eval_bool(
             Value::Bool(b) => b,
             _ => true,
         },
+    }
+}
+
+/// Stable-sort bindings by descending overlap score (count of satisfied WHERE
+/// leaf predicates). Equal scores keep their incoming order, so this is a no-op
+/// reorder for a single-leaf WHERE — every matching row scores 1.
+fn sort_by_overlap(
+    graph: &ArchivedGraph,
+    bindings: &mut [Binding],
+    pred: Option<&Expr>,
+    var_pos: &impl Fn(&str) -> Option<usize>,
+) {
+    let Some(pred) = pred else { return };
+    bindings.sort_by_key(|b| std::cmp::Reverse(overlap_score(graph, pred, b, var_pos)));
+}
+
+/// Count how many leaf predicates of `expr` this binding satisfies.
+///
+/// Unlike [`eval_bool`], OR does NOT short-circuit — both arms are scored and
+/// summed, so a row satisfying both sides of `A OR B` scores 2 while one
+/// satisfying only A scores 1. AND sums its arms too (a row passing the WHERE
+/// already satisfies both, so this just totals their leaves). NOT and a failing
+/// leaf contribute 0. The score is a relevance proxy, not a boolean — callers
+/// that need pass/fail still use `eval_bool`.
+fn overlap_score(
+    graph: &ArchivedGraph,
+    expr: &Expr,
+    binding: &Binding,
+    var_pos: &impl Fn(&str) -> Option<usize>,
+) -> u32 {
+    match expr {
+        Expr::BinOp(Op::And, l, r) | Expr::BinOp(Op::Or, l, r) => {
+            overlap_score(graph, l, binding, var_pos) + overlap_score(graph, r, binding, var_pos)
+        }
+        // Every other shape is a leaf for scoring: 1 when it holds, else 0.
+        // `eval_bool` handles NOT/IsNull/StrMatch/comparison/IN/regex truthiness.
+        _ => eval_bool(graph, expr, binding, var_pos) as u32,
     }
 }
 

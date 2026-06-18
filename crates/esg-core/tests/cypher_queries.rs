@@ -404,3 +404,50 @@ fn ne_against_missing_property_is_false() {
     );
     assert!(rows.is_empty());
 }
+
+/// Default relevance order: with no explicit ORDER BY, a multi-term OR filter
+/// floats the row matching the MOST terms to the front BEFORE limit. Regression
+/// for the chat graph lane's "廣州寬褲" miss — `name FUZZY 'A' OR name FUZZY 'B'`
+/// used to return seed order, so a row matching both terms could sit past LIMIT
+/// behind rows matching only the broad term and get truncated away.
+#[test]
+fn no_order_by_ranks_by_overlap_before_limit() {
+    let bytes = sample_graph_bytes();
+    // "Nike Pegasus Pro" matches BOTH 'Nike' and 'Pro' (overlap 2); "Nike Air
+    // Zoom" matches only 'Nike' (overlap 1). With LIMIT 1 the both-match row
+    // must win regardless of seed order.
+    let rows = run(
+        &bytes,
+        "MATCH (p:Product) WHERE p.name FUZZY 'Nike' OR p.name FUZZY 'Pro' RETURN p.name LIMIT 1",
+    );
+    assert_eq!(names(&rows), vec!["Nike Pegasus Pro"]);
+}
+
+/// Overlap ordering is stable for equal scores: a single-term filter (every
+/// match scores 1) must not reorder rows, so an explicit ORDER BY still wins
+/// and a bare single-leaf WHERE keeps seed order.
+#[test]
+fn single_term_where_keeps_seed_order() {
+    let bytes = sample_graph_bytes();
+    // All three Nike rows score 1 on the lone term; seed order is p1, p3 (p2/p4
+    // are not Nike). Stable sort preserves it — no spurious reshuffle.
+    let rows = run(
+        &bytes,
+        "MATCH (p:Product) WHERE p.name FUZZY 'Nike' RETURN p.name",
+    );
+    assert_eq!(names(&rows), vec!["Nike Air Zoom", "Nike Pegasus Pro"]);
+}
+
+/// Explicit ORDER BY is untouched by the overlap default — the relevance sort
+/// only kicks in when ORDER BY is absent.
+#[test]
+fn explicit_order_by_overrides_overlap() {
+    let bytes = sample_graph_bytes();
+    let rows = run(
+        &bytes,
+        "MATCH (p:Product) WHERE p.name FUZZY 'Nike' OR p.name FUZZY 'Pro' RETURN p.name, p.price_cents ORDER BY p.price_cents LIMIT 1",
+    );
+    // Cheapest of the matches is Pegasus 9000 — but here it wins by PRICE, not
+    // overlap; the assertion guards that ORDER BY still drives the sort.
+    assert_eq!(names(&rows), vec!["Nike Pegasus Pro"]);
+}
