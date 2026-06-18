@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.8.6 — default relevance order by WHERE-predicate overlap
+
+`graph.bin` format is unchanged (VERSION 6) — query-side only, no re-build
+needed. A query with **no explicit `ORDER BY`** now returns rows ranked by how
+many WHERE leaf predicates each row satisfies (its "overlap"), highest first,
+applied BEFORE `SKIP`/`LIMIT`.
+
+### Fixed
+- **Specific multi-term matches no longer truncated away.** A multi-term OR
+  filter — e.g. the chat graph lane's `name FUZZY 'A' OR name FUZZY 'B'` — used
+  to return rows in arbitrary seed order, so a row matching BOTH terms (the
+  specific product the user named) could sit past `LIMIT` behind dozens of rows
+  matching only the broad term and get dropped. Real case: "廣州寬褲" → the
+  product "廣州選品小個子寬褲" (matches both 廣州 and 寬褲) ranked ~25th behind
+  49 "…寬褲" rows and fell outside `LIMIT 12`. Counting satisfied leaves floats
+  the most-specific match to the front. Single-leaf filters and `ORDER BY`
+  queries are unaffected (stable sort; explicit order still wins).
+
 ## 0.8.3 — drop non-product nodes, capture multi-image galleries
 
 `graph.bin` format is unchanged (VERSION 6). Extraction-side: re-crawl/re-build
